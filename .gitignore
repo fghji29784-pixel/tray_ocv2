@@ -5,5 +5,7 @@ data/raw/*
 data/processed/*
 !data/**/.gitkeep
 reports/figures/demo/
+reports/demo_run/
 *.xlsx
 *.xls
+*.csv

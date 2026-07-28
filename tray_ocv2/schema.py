@@ -158,18 +158,20 @@ class Stage:
     temp_col: str | None    # 측정 시점 온도 컬럼
     start_col: str | None   # 측정 시작 시각
     in_charger: bool    # True=충방전기 내부(팬 가동) / False=별도 OCV 계측기
+    end_col: str | None = None   # 측정 종료 시각 (OCV만 확보됨)
+    dur_col: str | None = None   # 측정 작업시간
 
 
 def _ocv(n: int, order: int, soc: float) -> Stage:
-    return Stage(f"ocv{n}", f"OCV #{n:02d}", order, soc,
-                 f"OCV #{n:02d} OCV", f"OCV #{n:02d}_온도",
-                 f"OCV #{n:02d} 시작시간", True)
+    p = f"OCV #{n:02d}"
+    return Stage(f"ocv{n}", p, order, soc, f"{p} OCV", f"{p}_온도",
+                 f"{p} 시작시간", True, f"{p} 종료시간", f"{p} 작업시간")
 
 
 def _prvt(n: int, order: int) -> Stage:
-    return Stage(f"prvt{n}", f"전용OCV #{n:02d}", order, 30.0,
-                 f"PRIVT OCV #{n:02d} OCV", f"PRIVT OCV #{n:02d} 온도",
-                 f"PRIVT OCV #{n:02d} 시작시간", False)
+    p = f"PRIVT OCV #{n:02d}"
+    return Stage(f"prvt{n}", f"전용OCV #{n:02d}", order, 30.0, f"{p} OCV",
+                 f"{p} 온도", f"{p} 시작시간", False)
 
 
 #: 전압 측정 단계 (공정 순서). SOC 는 docs/00_facts.md §1.2
@@ -321,7 +323,8 @@ def all_expected_columns() -> list[str]:
     """스키마가 기대하는 전체 컬럼 목록 (inspect 단계에서 대조용)."""
     cols = list(ID_COLS.values()) + [DOCV7_COL] + list(END_VOLTAGE_COLS)
     for s in STAGES:
-        cols += [c for c in (s.value_col, s.temp_col, s.start_col) if c]
+        cols += [c for c in (s.value_col, s.temp_col, s.start_col,
+                             s.end_col, s.dur_col) if c]
     for t in THERM_STEPS:
         cols += [c for c in t.temp_cols.values() if c]
         cols += [c for c in (t.start_col, t.end_col, t.dur_col) if c]

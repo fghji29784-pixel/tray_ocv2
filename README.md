@@ -16,6 +16,7 @@
 | [`docs/01_analysis_plan.md`](docs/01_analysis_plan.md) | **분석 계획** — A~J 그룹, 각 분석에 ID 부여 (코드·그림이 같은 ID 사용) |
 | [`docs/02_presentation_story.md`](docs/02_presentation_story.md) | **발표 시나리오** — 슬라이드 20장 흐름, 용어 치환표 |
 | [`docs/03_viz_guidelines.md`](docs/03_viz_guidelines.md) | **시각화 규칙** — R1~R10. `style.py` 가 코드로 강제 |
+| [`docs/04_logic_audit.md`](docs/04_logic_audit.md) | **논리 감사** — 계획의 오류 5건과 수정, 추가 분석 6건 |
 
 ---
 
@@ -55,13 +56,22 @@
 ```bash
 pip install -r requirements.txt
 
-# 시각화 스타일 데모 (합성 데이터, 데이터 없이 실행 가능)
-python -m tests.demo_style
-# → reports/figures/demo/*.png
+# 1) 합성 데이터로 전체 파이프라인이 도는지 먼저 확인 (실 데이터 없이 가능)
+python -m tests.test_pipeline
+python -m tests.demo_style          # → reports/figures/demo/*.png
+
+# 2) 실제 파일로: 먼저 컬럼 매핑을 확인
+python -m tray_ocv2.cli inspect --input "<Export파일>.xlsx"
+
+# 3) 전체 진단 실행 (A→K→C→F 순, docs/01_analysis_plan.md 실행순서 참고)
+python -m tray_ocv2.cli run --input "<Export파일>.xlsx" --outdir reports/run1
+# → reports/run1/report_auto.md, figures/*.png, processed_cell_table.csv
 ```
 
 **실행 환경 제약**: Python 3.8 · 32bit · **scipy/sklearn 없음** → 통계·회귀·이상탐지를
 전부 numpy로 직접 구현한다. 한글 폰트(Malgun Gothic)는 사용 가능 → **그림 라벨 전부 한글**.
+Windows 콘솔 인코딩(cp949) 문제로 `cli.py` 가 stdout/stderr 을 UTF-8로 강제한다 —
+터미널에 글자가 깨져 보이면 실행 전 `chcp 65001` 을 권장(리포트 파일 자체는 정상 UTF-8).
 
 ---
 
@@ -69,15 +79,28 @@ python -m tests.demo_style
 
 ```
 tray_ocv2/
-  docs/            00 사실 · 01 분석계획 · 02 발표시나리오 · 03 시각화규칙
+  docs/              00 사실 · 01 분석계획 · 02 발표시나리오 · 03 시각화규칙 · 04 논리감사
   tray_ocv2/
-    style.py       발표용 시각화 기반 (한글폰트·색언어·트레이 히트맵 표준형·판정기준 % 이중눈금)
-    ...            (분석 모듈은 계획 ID 순서대로 추가)
+    schema.py         실 Export 컬럼명 ↔ 도메인 개념 매핑. 좌표계·팬기하·판정로직 상수
+    io_load.py         파일 로딩 + 셀 단위 표준 테이블 구성
+    fields.py           격자 변환 · 로버스트 통계 · 트레이 내 편차 (공유 기반)
+    qc.py             [A] 신뢰성: LSB·결측·중복·등급구성분해(A7)·단위대조(A9)·시계검증(A8)
+    timing.py         [K] 시간축: 공정순서 실측역추정·에이징시간·율변환·휴지시간(K10)
+    indicators.py     [C] 자기방전 3지표: S_A/S_B/S_C 계산·상관(C1)·준독립대조(C2)
+    fan.py              [F] 팬 서명: 세로프로파일(F1)·밴드별판결문(F2)·발열비교(F3)
+    cli.py            명령행 진입점 (inspect / run)
+    style.py          발표용 시각화 기반 (한글폰트·색언어·트레이 히트맵 표준형)
   tests/
-    demo_style.py  스타일 데모 (합성 데이터)
-  data/raw/        입력 (git 제외)
-  reports/figures/ 산출 그림
+    make_synthetic.py 스키마와 일치하는 합성 Export 생성 (팬서명·자기방전·결측 내장)
+    test_pipeline.py  전체 파이프라인 스모크 테스트
+    demo_style.py     스타일 데모
+  data/raw/          입력 (git 제외)
+  reports/           산출 리포트·그림·처리된 테이블 (git 제외)
 ```
+
+**구현 상태**: A(신뢰성) · K(시간) · C(3지표) · F0~F3(팬 서명, 온도 기반) 까지 코드로
+구현·합성 데이터로 검증 완료. B/D/E/G/H/I/J/L/M 그룹은 계획 문서에만 있고 미구현
+(`docs/01_analysis_plan.md` 참고, 실 데이터 확보 후 순차 추가 예정).
 
 ### 시각화 규칙 요약 (`style.py` 가 강제)
 
@@ -91,7 +114,14 @@ tray_ocv2/
 
 ## 진행 상태
 
-- [x] 문서 4종 (사실 · 계획 · 발표 시나리오 · 시각화 규칙)
+- [x] 문서 5종 (사실 · 계획 · 발표 시나리오 · 시각화 규칙 · 논리 감사)
 - [x] `style.py` + 데모 그림 3종
-- [ ] 데이터 로더 · 컬럼 매핑 (실 데이터 확보 후)
-- [ ] A(신뢰성) → C(3지표) → B(정보흐름) → D(상관) → E/F/G/H(원인) → I/J(보정)
+- [x] 좌표계 확정 (알파벳=가로, 숫자=세로=팬밴드축) + 스키마 매핑 (실 컬럼 156개)
+- [x] `io_load` 로더 · `schema.verify_position_consistency`(A6)
+- [x] **A(신뢰성)** — LSB(A1)·결측맵(A2)·중복(A5)·시계검증(A8)·**등급구성분해(A7)**·**단위대조(A9)**
+- [x] **K(시간)** — 공정순서 실측역추정·에이징시간·율변환(mV/day)·**직전휴지시간(K10, 오류1 검증)**
+- [x] **C(3지표)** — S_A/S_B/S_C 계산·트레이내편차·**상관행렬(C1, 최우선 관문)**·**준독립대조(C2)**
+- [x] **F0~F3(팬 서명, 온도 기반)** — 단계간 재현성·세로프로파일·**밴드별 판결문(F2)**·발열비교
+- [x] 합성 데이터로 전체 파이프라인 검증 완료 — 설계한 팬패턴·자기방전 신호가 정확히 재현됨
+- [ ] B(정보흐름) · D(상관지도) · E/G/H(공간지문·측정계·시계열) · I/J(판정영향·보정) · L/M(패턴유형·ML)
+      — 실 데이터 확보 후 순차 구현 (`docs/01_analysis_plan.md` 실행순서 참고)
