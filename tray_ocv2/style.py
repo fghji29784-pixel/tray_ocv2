@@ -28,10 +28,10 @@ from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 #: 현행 판정 오프셋 (mV). 모든 크기 비교의 기준자.
 JUDGE_MARGIN_MV = 0.8
 
-#: 트레이 격자
+#: 트레이 격자 — 좌표계는 schema.py 에서 확정 (알파벳=가로/열, 숫자=세로/행)
 N_ROWS, N_COLS = 12, 12
-ROW_LABELS = list("ABCDEFGHIJKL")          # 행 A~L
-COL_LABELS = [str(i) for i in range(1, 13)]  # 열 1~12
+ROW_LABELS = [str(i) for i in range(1, 13)]   # 행(세로) = 숫자 1~12
+COL_LABELS = list("ABCDEFGHIJKL")             # 열(가로) = 알파벳 A~L
 
 #: 충방전기 냉각팬 배열 (docs/00_facts.md §3.1). (행중심, [열중심...])
 #: 도면 픽셀 판독값 — CAD 검증 전. 직경은 미확정이라 표시용 기본값만 둔다.
@@ -237,11 +237,11 @@ def tray_heatmap(ax, grid, *, unit: str = "mV", diverging: bool = True,
     im = ax.imshow(np.ma.masked_invalid(g), cmap=cmap, vmin=vmin, vmax=vmax,
                    interpolation="nearest", zorder=2)
 
-    # 행 A~L / 열 1~12 라벨 (열 번호는 아래쪽 — 위쪽은 부제 자리)
+    # 가로 = 알파벳 A~L / 세로 = 숫자 1~12 (라벨은 아래쪽 — 위쪽은 부제 자리)
     ax.set_xticks(range(N_COLS), COL_LABELS)
     ax.set_yticks(range(N_ROWS), ROW_LABELS)
-    ax.set_xlabel("열 (트레이 가로 위치)")
-    ax.set_ylabel("행 (트레이 세로 위치)")
+    ax.set_xlabel("가로 위치 (A ~ L)")
+    ax.set_ylabel("세로 위치 (1 ~ 12)  ← 팬 3밴드 방향")
     ax.set_xticks(np.arange(-0.5, N_COLS, 1), minor=True)
     ax.set_yticks(np.arange(-0.5, N_ROWS, 1), minor=True)
     ax.grid(which="minor", color="#FFFFFF", lw=1.0)
