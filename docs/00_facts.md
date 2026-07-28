@@ -320,7 +320,12 @@ docv7 = PRVT1 − PRVT3   (또는 Delta OCV #07 컬럼)
 
 | 항목 | 값 |
 |---|---|
-| Python | **3.8.5 · 32bit** |
-| 가용 | numpy 1.24 / pandas 2.0 / matplotlib 3.7 |
-| **불가** | **scipy · sklearn 없음** → 통계·회귀·이상탐지를 전부 numpy로 직접 구현 |
+| 설계 기준 PC | Python 3.8.5 · 32bit · numpy 1.24 / pandas 2.0 / matplotlib 3.7 |
+| **코드 정책** | **scipy · sklearn 미사용** → 통계·회귀·이상탐지를 전부 numpy로 직접 구현.
+  32bit 제약 때문에 시작한 선택이지만, **어느 환경에서 돌리든 유지**한다 (의존성 최소화) |
 | 한글 폰트 | **Malgun Gothic · NanumGothic · Noto Sans KR 사용 가능** → 그림 라벨 전부 한글 |
+
+> ⚠️ **실행 PC는 사람마다 다를 수 있다.** 예: 다운로드해 실행하는 PC가 Python 3.14 64bit인 경우,
+> `requirements.txt` 의 `numpy<2` 같은 상한이 있으면 그 파이썬 버전용 사전빌드 wheel이 없어
+> **소스 빌드를 시도하다 컴파일러 부재로 실패**한다(2026-07 실사례). 버전 상한은 실제로
+> 필요한 게 아니면 걸지 않는다 — 하한만 지정하고 pip가 알아서 호환 버전을 고르게 둔다.
