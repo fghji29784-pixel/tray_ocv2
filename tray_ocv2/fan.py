@@ -2,6 +2,16 @@
 
 온도로 먼저 검증한다(F0~F3). 전압은 SOC·자기방전 등이 섞이지만 온도는 순수한 열장이다.
 예측값은 schema.py 에 데이터 라벨(세로 1~12, 가로 A~L)로 못박아 두었다.
+
+★ docs/04_logic_audit.md 오류6·7·10 을 반영해 재작성했다:
+  - 오류6: F2 밴드1·3(상·하)은 둘 다 '가장자리' → 팬과 무관한 중앙-가장자리 효과만으로도
+    '상단≈하단≠중앙'이 나온다. edge_detrend() 로 그 성분을 먼저 제거한 뒤 비교한다.
+    그리고 schema.FAN_COL_MIN_OUTER/MIDDLE(팬 고유 예측)을 predicted_minima_check() 로
+    직접 검정한다 — band_similarity 만으로는 팬을 고유하게 식별하지 못한다.
+  - 오류7: F0 옛 기준("모든 스텝이 같아야")이 F3과 모순됐다. cluster_reproducibility() 로
+    "열이력이 같은 스텝끼리만 재현되어야 한다"로 재정의했다.
+  - 오류10: 발열/무발열 이분법(구 amplitude_vs_heat)은 LCI 등 교란에 취약하다.
+    heat_vs_amplitude_regression() 으로 실제 발열량(연속량) 대 진폭을 회귀한다.
 """
 from __future__ import annotations
 
@@ -9,11 +19,15 @@ import numpy as np
 import pandas as pd
 
 from . import schema
-from .fields import position_field, tray_delta
+from .fields import cell_edge_distance, position_field, tray_delta
 
 
 def row_profile(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
-    """[F1] 세로(1~12) 프로파일. 트레이 내 편차 기준, 평균±표준오차."""
+    """[F1] 세로(1~12) 프로파일. 트레이 내 편차 기준, 평균±표준오차.
+
+    ⚠️ 여기엔 등방 중앙-가장자리 성분이 그대로 섞여 있다(그 자체가 관측 대상이기도
+    하다). 팬 고유 성분만 보려면 F2(edge_detrend 적용)를 봐야 한다.
+    """
     d = df.copy()
     d["_dev"] = tray_delta(d, value_col, stat="median")
     g = d.groupby("row")["_dev"]
@@ -25,18 +39,40 @@ def row_profile(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
     return out.sort_values("row", ignore_index=True)
 
 
-def band_column_profile(df: pd.DataFrame, value_col: str) -> dict:
-    """[F2] ★★ 판결문 — 밴드별(상/중/하) 가로(A~L) 프로파일.
+def edge_detrend(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
+    """[오류6 수정] 테두리거리별 평균(등방 중앙-가장자리 성분)을 뺀 잔차(_resid) 추가.
 
-    상단≈하단 ≠ 중앙 이면 팬 확정(비분리형). 셋이 같으면 팬 기각(분리형=배선·기구물).
+    F2 밴드1(세로1~4)·밴드3(세로9~12)은 둘 다 '가장자리'다. 팬과 무관한 어떤
+    중앙-가장자리 열전달 효과도 '밴드1≈밴드3≠밴드2(중앙)'를 만든다. 이 성분을
+    먼저 제거해야 남는 신호가 팬 고유(주기적) 성분에 가까워진다.
     """
-    d = df.copy()
-    d["_dev"] = tray_delta(d, value_col, stat="median")
+    out = df.copy()
+    out["_dev"] = tray_delta(out, value_col, stat="median")
+    out["_edge_d"] = cell_edge_distance(out)
+    edge_profile = out.groupby("_edge_d")["_dev"].transform("mean")
+    out["_resid"] = out["_dev"] - edge_profile
+    return out
+
+
+def band_column_profile(df: pd.DataFrame, value_col: str, detrend: bool = True) -> dict:
+    """[F2] 밴드별(상/중/하) 가로(A~L) 프로파일.
+
+    detrend=True(기본): edge_detrend 잔차 사용 — 중앙-가장자리 성분 제거 후 비교.
+    detrend=False: 옛 방식(등방 성분 포함) — 비교용으로만 남겨둔다.
+    """
+    if detrend:
+        d = edge_detrend(df, value_col)
+        col_for_profile = "_resid"
+    else:
+        d = df.copy()
+        d["_dev"] = tray_delta(d, value_col, stat="median")
+        col_for_profile = "_dev"
+
     profiles = {}
     for band in schema.FAN_BANDS:
         r0, r1 = band["rows"]
         sub = d[(d["row"] >= r0) & (d["row"] <= r1)]
-        g = sub.groupby("col")["_dev"]
+        g = sub.groupby("col")[col_for_profile]
         prof = pd.DataFrame({"col": g.mean().index, "mean": g.mean().to_numpy(),
                             "n": g.count().to_numpy()}).sort_values("col")
         prof["col_label"] = prof["col"].map(
@@ -46,9 +82,11 @@ def band_column_profile(df: pd.DataFrame, value_col: str) -> dict:
 
 
 def band_similarity(profiles: dict) -> dict:
-    """[F2 판정] 상단 vs 중앙, 하단 vs 중앙, 상단 vs 하단 프로파일 상관.
+    """[F2] 상단 vs 중앙, 하단 vs 중앙, 상단 vs 하단 프로파일 상관.
 
-    상단↔하단은 높고 (상·하)↔중앙은 낮아야 '밴드마다 주기가 다르다'가 성립한다.
+    ⚠️ detrend 적용 후에도, 이 지표 하나만으로는 팬을 '고유하게' 식별하지 못한다
+    (다른 비등방 원인도 같은 패턴을 만들 수 있음). predicted_minima_check() 와
+    함께 봐야 한다 — 오류6 참조.
     """
     names = list(profiles)
     if len(names) < 3:
@@ -72,19 +110,108 @@ def band_similarity(profiles: dict) -> dict:
         f"{top}_vs_{bot}": corr(top, bot),
         f"{top}_vs_{mid}": corr(top, mid),
         f"{bot}_vs_{mid}": corr(bot, mid),
-        "note": (f"'{top} vs {bot}' 상관이 높고 '~vs~{mid}' 상관이 낮으면 → "
-                "밴드마다 가로 주기가 다름(비분리형) → 팬 확정에 부합"),
+        "note": ("detrend 적용됨(기본). 이 지표는 참고용 — 팬 고유 식별은 "
+                "predicted_minima_check() 로 별도 검정할 것"),
+    }
+
+
+def predicted_minima_check(profiles: dict) -> dict:
+    """[오류6 수정] ★판결문 대체 — schema.FAN_COL_COLD_OUTER/MIDDLE 예측을 직접 검정.
+
+    band_similarity(상관)는 팬과 다른 비등방 원인을 못 가른다. 여기서는 도면에서
+    미리 못박은 '냉각 최강(차가움) 예측 열'(팬 중심에 가장 가까운 열)의 평균이,
+    detrend 잔차 기준으로 나머지 열보다 실제로 낮은지(더 차가운지)를 직접 확인한다 —
+    팬 기하 자체의 사전등록 예측이라 band_similarity보다 식별력이 높다.
+    """
+    band_pred = {"상단": schema.FAN_COL_COLD_OUTER, "하단": schema.FAN_COL_COLD_OUTER,
+                "중앙": schema.FAN_COL_COLD_MIDDLE}
+    results = {}
+    for name, prof in profiles.items():
+        pred_cols = band_pred.get(name, [])
+        if not pred_cols or prof.empty:
+            continue
+        is_pred = prof["col_label"].isin(pred_cols)
+        if is_pred.sum() == 0 or (~is_pred).sum() == 0:
+            continue
+        pred_mean = float(prof.loc[is_pred, "mean"].mean())
+        other_mean = float(prof.loc[~is_pred, "mean"].mean())
+        results[name] = {
+            "predicted_cold_cols": pred_cols,
+            "predicted_mean": pred_mean, "other_cols_mean": other_mean,
+            "colder_as_predicted": bool(pred_mean < other_mean),
+        }
+    results["note"] = ("등방 성분(테두리거리) 제거된 잔차 기준. 예측 열의 평균이 "
+                       "나머지보다 낮아야(더 차가워야) 팬 도면 예측에 부합한다. "
+                       "band_similarity 와 반드시 함께 본다")
+    return results
+
+
+def classify_temp_cols(temp_cols: list[str]) -> dict:
+    """[오류7] 컬럼명(t_<key> 또는 temp_<key>_<stat>) → schema.classify_thermal_state 매핑.
+
+    분류 결과를 카테고리별 컬럼 리스트로 묶어 반환한다.
+    """
+    def _key(col: str) -> str | None:
+        if col.startswith("t_"):
+            return col[2:]
+        if col.startswith("temp_"):
+            rest = col[len("temp_"):]
+            for suf in ("_min", "_mean", "_max", "_single"):
+                if rest.endswith(suf):
+                    return rest[: -len(suf)]
+            return rest
+        return None
+
+    groups: dict = {}
+    for c in temp_cols:
+        key = _key(c)
+        cat = schema.classify_thermal_state(key) if key else "unknown"
+        groups.setdefault(cat, []).append(c)
+    return groups
+
+
+def cluster_reproducibility(corr: pd.DataFrame) -> dict:
+    """[오류7 수정] F0 판정 기준 재정의.
+
+    옛 기준("모든 스텝에서 같은 무늬")은 F3(발열이 있어야 구배가 생김)과 모순된다.
+    실측(Run #1)도 'equilibrium'(에이징 직후 열평형)과 'recent_heat'(충방전 직후
+    잔열) 두 군집으로 뚜렷이 갈렸다(군집 내 |r|>0.7, 군집 간 |r|<0.3).
+    올바른 기준: recent_heat 끼리는 강하게 재현되고, 두 부류 사이는 약해야 한다.
+    """
+    groups = classify_temp_cols(list(corr.index))
+
+    def _avg(pairs):
+        vals = [corr.loc[a, b] for a, b in pairs if a in corr.index and b in corr.columns]
+        vals = [v for v in vals if np.isfinite(v)]
+        return float(np.mean(vals)) if vals else np.nan
+
+    within = {}
+    for cat, cols in groups.items():
+        pairs = [(a, b) for i, a in enumerate(cols) for b in cols[i + 1:]]
+        within[cat] = _avg(pairs)
+
+    cats = [c for c in groups if len(groups[c]) > 0]
+    cross_pairs = []
+    for i, c1 in enumerate(cats):
+        for c2 in cats[i + 1:]:
+            cross_pairs += [(a, b) for a in groups[c1] for b in groups[c2]]
+    cross = _avg(cross_pairs)
+
+    return {
+        "within_by_category": within, "cross_category_mean": cross,
+        "n_by_category": {k: len(v) for k, v in groups.items()},
+        "note": ("within_by_category['recent_heat'] 가 cross_category_mean 보다 "
+                "뚜렷이 크면(예: >0.5 vs <0.3) 재정의된 F0 기준 충족. "
+                "'모든 스텝이 같아야' 라는 옛 기준은 폐기"),
     }
 
 
 def stage_field_reproducibility(df: pd.DataFrame, temp_cols: list[str]) -> pd.DataFrame:
-    """[F0] 여러 단계의 온도 필드(트레이 편차)가 서로 재현되는가.
+    """[F0] 여러 단계의 온도 필드(트레이 편차)가 서로 재현되는가 — 원시 상관행렬.
 
-    팬은 상시 가동·고정 배열이므로 모든 스텝에서 같은 무늬여야 한다.
-    144차원 위치 필드끼리의 상관행렬로 확인.
+    판정은 이 행렬 자체가 아니라 cluster_reproducibility() 의 군집별 요약으로 한다
+    (오류7 — '모든 스텝이 같아야'는 틀린 기준).
     """
-    from .fields import pairwise_corr
-
     d = df.copy()
     dev_cols = []
     for c in temp_cols:
@@ -118,22 +245,27 @@ def stage_field_reproducibility(df: pd.DataFrame, temp_cols: list[str]) -> pd.Da
     return pd.DataFrame(mat, index=keys, columns=keys)
 
 
+def _rms_amp(df: pd.DataFrame, col: str) -> float:
+    if col not in df.columns:
+        return np.nan
+    d = df.copy()
+    d["_dev"] = tray_delta(d, col, stat="median")
+    f = position_field(d, "_dev", agg="rms").to_numpy()
+    return float(np.nanmean(f))
+
+
 def amplitude_vs_heat(df: pd.DataFrame, no_heat_cols: list[str],
                       heat_cols: list[str]) -> dict:
-    """[F3] 무발열 스텝 vs 발열 스텝의 온도 필드 진폭(RMS) 비교.
+    """[F3-구버전] 무발열 vs 발열 이분법 진폭(RMS) 비교. 참고용으로 유지.
 
-    발열이 있어야 냉각 불균일이 드러난다 → 발열 스텝 진폭이 커야 팬 가설에 부합.
+    ⚠️ 오류10: 이분법이 실제 발열량 차이를 반영 못 하는 경우가 있다(예: 1차 충전은
+    전류가 작아 발열이 적을 수 있음 — Run #1 에서 temp_charge1_mean 진폭이 '무발열'
+    기준 t_ocv1 보다도 작게 나온 실례). 주 판정은 heat_vs_amplitude_regression() 로 한다.
+    호출 시 no_heat_cols 에서 'separate_instrument'(LCI 등)로 분류되는 스텝은 미리
+    제외할 것 — 안 그러면 팬과 무관한 이상치가 '무발열' 평균을 왜곡한다(오류10 실례).
     """
-    def rms_amp(col):
-        if col not in df.columns:
-            return np.nan
-        d = df.copy()
-        d["_dev"] = tray_delta(d, col, stat="median")
-        f = position_field(d, "_dev", agg="rms").to_numpy()
-        return float(np.nanmean(f))
-
-    no_heat = {c: rms_amp(c) for c in no_heat_cols}
-    heat = {c: rms_amp(c) for c in heat_cols}
+    no_heat = {c: _rms_amp(df, c) for c in no_heat_cols}
+    heat = {c: _rms_amp(df, c) for c in heat_cols}
     no_heat_mean = np.nanmean(list(no_heat.values())) if no_heat else np.nan
     heat_mean = np.nanmean(list(heat.values())) if heat else np.nan
     return {
@@ -141,5 +273,44 @@ def amplitude_vs_heat(df: pd.DataFrame, no_heat_cols: list[str],
         "no_heat_mean_rms": no_heat_mean, "heat_mean_rms": heat_mean,
         "ratio_heat_over_no_heat": (heat_mean / no_heat_mean
                                     if no_heat_mean and no_heat_mean > 0 else np.nan),
-        "note": "비율이 1보다 뚜렷이 크면 F3(진폭∝발열량) 부합",
+        "note": "참고용 이분법 비교. 주 판정은 heat_vs_amplitude_regression() 를 볼 것",
+    }
+
+
+def heat_vs_amplitude_regression(df: pd.DataFrame,
+                                 rise_stat_cols: list[tuple]) -> dict:
+    """[오류10 수정] ★F3 주 판정 — 발열량(연속량) 대 위치필드 진폭(RMS) 회귀.
+
+    발열/무발열 이분법 대신, 각 스텝의 실제 자기발열 크기(최고−최저 온도 중앙값)를
+    가로축으로, 그 스텝 온도필드의 RMS 진폭을 세로축으로 놓고 상관·기울기를 본다.
+    양의 상관·양의 기울기가 뚜렷하면 F3(진폭∝발열량) 이 이분법보다 강한 증거로 지지된다.
+
+    rise_stat_cols: [(mean_col, min_col, max_col, label), ...] — Charge/DisCharge 처럼
+    최저/평균/최고 3통계가 있는 스텝만 대상이 된다.
+    """
+    rows = []
+    for mean_col, min_col, max_col, label in rise_stat_cols:
+        if not all(c in df.columns for c in (mean_col, min_col, max_col)):
+            continue
+        rise = (pd.to_numeric(df[max_col], errors="coerce")
+               - pd.to_numeric(df[min_col], errors="coerce"))
+        amp = _rms_amp(df, mean_col)
+        rows.append({"stage": label, "median_rise_c": float(rise.median()),
+                    "field_rms": amp})
+    table = pd.DataFrame(rows)
+    if len(table) < 4:
+        return {"table": table, "ok": False, "reason": "회귀에 필요한 스텝 수 부족(<4)"}
+
+    x = table["median_rise_c"].to_numpy()
+    y = table["field_rms"].to_numpy()
+    ok = np.isfinite(x) & np.isfinite(y)
+    if ok.sum() < 4 or np.std(x[ok]) < 1e-9:
+        return {"table": table, "ok": False, "reason": "유효 표본·분산 부족"}
+
+    r = float(np.corrcoef(x[ok], y[ok])[0, 1])
+    slope, intercept = (float(v) for v in np.polyfit(x[ok], y[ok], 1))
+    return {
+        "table": table, "ok": True, "corr": r, "slope": slope, "intercept": intercept,
+        "note": ("발열량(최고-최저 중앙값, °C) vs 필드 진폭(RMS) 의 스텝간 상관·기울기. "
+                "이분법(F3-구버전) 대체. corr·slope 모두 뚜렷한 양수여야 F3 지지"),
     }

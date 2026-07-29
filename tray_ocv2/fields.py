@@ -87,6 +87,28 @@ def edge_distance() -> np.ndarray:
     return np.minimum.reduce([rr, N_ROWS - 1 - rr, cc, N_COLS - 1 - cc])
 
 
+def cell_edge_distance(df: pd.DataFrame, row_col: str = "row",
+                       col_col: str = "col") -> pd.Series:
+    """[오류6 수정용] 각 셀의 (row,col) 에 대응하는 테두리 거리(0~5).
+
+    등방적 중앙-가장자리 성분을 제거(detrend)하는 데 쓴다 — F2 밴드 비교가 이 성분과
+    팬 성분을 못 가르는 문제(docs/04_logic_audit.md 오류6)의 해결책.
+    """
+    grid = edge_distance()
+    row = pd.to_numeric(df[row_col], errors="coerce")
+    col = pd.to_numeric(df[col_col], errors="coerce")
+    out = pd.Series(np.nan, index=df.index)
+    ok = row.notna() & col.notna()
+    if not ok.any():
+        return out
+    r = row[ok].astype(int).to_numpy() - 1
+    c = col[ok].astype(int).to_numpy() - 1
+    valid = (r >= 0) & (r < N_ROWS) & (c >= 0) & (c < N_COLS)
+    idx = df.index[ok][valid]
+    out.loc[idx] = grid[r[valid], c[valid]]
+    return out
+
+
 def ring_score(grid: np.ndarray) -> float:
     """테두리 평균 − 중앙 평균. 양수면 링(테두리 高), 음수면 역링."""
     d = edge_distance()

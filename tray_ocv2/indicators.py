@@ -2,6 +2,14 @@
 
 ⚠️ docs/04_logic_audit.md 오류 1: S_A·S_B 는 충전 "직후" 값의 차이라 이완(relaxation)이
 섞여 있을 수 있다. compute() 가 반환하는 rest_before_from 컬럼으로 반드시 함께 확인한다.
+
+⚠️ 오류8: C1(상관행렬)의 무상관은 "신호 없음"과 "신뢰도가 낮아 상관이 감쇠됨"을
+구분하지 못한다. reliability_report()·disattenuated_matrix() 를 원 상관행렬과
+반드시 병기한다.
+
+⚠️ 오류9: S_A(HT1)·S_B(HT2)는 고온 노출시간이 3배 넘게 다를 수 있어(실측 Run #1:
+6.0h vs 18.0h) 정규화 없이 나란히 비교하면 안 된다. compute() 가 아레니우스 등가율
+(`*_rate_arrhenius`) 을 같이 계산한다.
 """
 from __future__ import annotations
 
@@ -10,11 +18,12 @@ import pandas as pd
 
 from . import schema
 from .fields import pairwise_corr, percentile_rank, tray_delta
-from .timing import indicator_hours, rate_mv_per_day, rest_before_ocv
+from .timing import (arrhenius_normalize, indicator_high_temp_hours, indicator_hours,
+                     rate_mv_per_day, rest_before_ocv)
 
 
 def compute(df: pd.DataFrame) -> pd.DataFrame:
-    """S_A/S_B/S_C(mV) + 구간시간(h) + 율(mV/day) + 직전 휴지시간(h) 추가."""
+    """S_A/S_B/S_C(mV) + 구간시간(h) + 율(mV/day) + 아레니우스 등가율 + 직전 휴지시간(h)."""
     out = df.copy()
     for ind in schema.INDICATORS:
         vf, vt = f"v_{ind.from_stage}", f"v_{ind.to_stage}"
@@ -24,6 +33,13 @@ def compute(df: pd.DataFrame) -> pd.DataFrame:
         out[f"{ind.key}_hours"] = hours
         if ind.key in out.columns:
             out[f"{ind.key}_rate"] = rate_mv_per_day(out[ind.key], hours)
+
+            hot_h = indicator_high_temp_hours(out, ind.key)
+            room_h = (hours - hot_h).clip(lower=0)
+            out[f"{ind.key}_hot_hours"] = hot_h
+            out[f"{ind.key}_room_hours"] = room_h
+            out[f"{ind.key}_rate_arrhenius"] = arrhenius_normalize(
+                out[ind.key], hot_h, room_h)
         out[f"{ind.key}_rest_before_h"] = rest_before_ocv(out, ind.from_stage)
     return out
 
@@ -110,3 +126,110 @@ def grade_composition(df: pd.DataFrame) -> dict:
     """[A7] 래퍼 — qc.grade_consistency 를 그대로 노출 (C 그룹에서도 참조하도록)."""
     from .qc import grade_consistency
     return grade_consistency(df)
+
+
+# ---------------------------------------------------------------------------
+# [오류8 수정] 신뢰도 · 감쇠보정 — C1 해석의 전제
+# ---------------------------------------------------------------------------
+# 상관계수는 측정 신뢰도가 낮으면 자동으로 0 쪽으로 끌려간다(감쇠, attenuation):
+#   관측 상관 최댓값 ≈ sqrt(신뢰도_A × 신뢰도_B)
+# 즉 S_A 신뢰도가 낮으면 진짜 성분이 완벽히 같아도 관측 상관은 0에 가깝게 나온다.
+# C1 ≈ 0 을 "세 지표가 다른 걸 잰다"로 곧장 해석하면 안 되는 이유다.
+
+def split_half_reliability_S_C(df: pd.DataFrame) -> dict:
+    """[오류8] PRVT 3점으로 S_C 신뢰도 추정 (Spearman-Brown 반분신뢰도).
+
+    (P1−P2)와 (P2−P3)를 반분(half-test)으로 보고, 두 반분 간 within-tray 상관에서
+    전체(P1−P3=S_C)의 신뢰도를 역산한다. 이완 오염이 있으면 보수적(과소)으로 나온다.
+    """
+    if not all(c in df.columns for c in ("v_prvt1", "v_prvt2", "v_prvt3")):
+        return {"ok": False, "reason": "PRVT2 컬럼 없음"}
+    d = df.copy()
+    d["_half1"] = d["v_prvt1"] - d["v_prvt2"]
+    d["_half2"] = d["v_prvt2"] - d["v_prvt3"]
+    h1 = tray_delta(d, "_half1", stat="median")
+    h2 = tray_delta(d, "_half2", stat="median")
+    ok = h1.notna() & h2.notna()
+    if ok.sum() < 30:
+        return {"ok": False, "reason": "표본 부족(<30)"}
+    if h1[ok].std() < 1e-12 or h2[ok].std() < 1e-12:
+        return {"ok": False, "reason": "분산 0"}
+    r12 = float(np.corrcoef(h1[ok], h2[ok])[0, 1])
+    sb = 2 * r12 / (1 + r12) if r12 > -1 else np.nan
+    return {
+        "ok": True, "half_corr": r12, "spearman_brown_reliability": float(sb),
+        "n": int(ok.sum()),
+        "note": "S_C(=docv7)의 반분신뢰도. 이완오염 있으면 과소추정(보수적) 될 수 있음",
+    }
+
+
+def quantization_reliability_bound(df: pd.DataFrame, indicator_key: str,
+                                   lsb_mv: float) -> dict:
+    """[오류8] LSB(분해능)만으로 추정하는 신뢰도 '상한'. 실제 신뢰도는 이보다 낮을 수 있다.
+
+    차분(S_A=OCV2−OCV3 등)은 두 개의 독립 양자화 잡음을 물려받는다고 가정:
+    noise_var = 2 × (LSB²/12) (균일분포 양자화 잡음 모델).
+    """
+    if indicator_key not in df.columns or not np.isfinite(lsb_mv):
+        return {"ok": False, "reason": "지표 컬럼 또는 LSB 없음"}
+    var_total = float(pd.to_numeric(df[indicator_key], errors="coerce").var())
+    if not np.isfinite(var_total) or var_total <= 0:
+        return {"ok": False, "reason": "분산 계산 불가"}
+    noise_var = 2 * (lsb_mv ** 2) / 12.0
+    reliability = max(0.0, 1 - noise_var / var_total)
+    return {
+        "ok": True, "lsb_mv": lsb_mv, "noise_var": noise_var,
+        "signal_var_total": var_total, "reliability_upper_bound": reliability,
+        "note": "양자화만 고려한 상한 — 실제 신뢰도는 이보다 낮을 수 있음(과장 금지)",
+    }
+
+
+def reliability_report(df: pd.DataFrame) -> dict:
+    """[오류8] 세 지표의 신뢰도 추정 — C1 상관행렬과 반드시 병기한다."""
+    from .qc import lsb_estimate
+
+    out = {}
+    for ind in schema.INDICATORS:
+        if ind.key == "S_C":
+            out[ind.key] = split_half_reliability_S_C(df)
+            continue
+        vf, vt = f"v_{ind.from_stage}", f"v_{ind.to_stage}"
+        lsbs = [lsb_estimate(df[c]) for c in (vf, vt) if c in df.columns]
+        lsbs = [x for x in lsbs if np.isfinite(x)]
+        if not lsbs:
+            out[ind.key] = {"ok": False, "reason": "LSB 추정 불가"}
+            continue
+        out[ind.key] = quantization_reliability_bound(df, ind.key, max(lsbs))
+    return out
+
+
+def _reliability_value(rel: dict) -> float:
+    if not rel.get("ok"):
+        return np.nan
+    return rel.get("reliability_upper_bound", rel.get("spearman_brown_reliability", np.nan))
+
+
+def disattenuated_corr(r_observed: float, reliability_a: float, reliability_b: float) -> float:
+    """[오류8] 신뢰도로 보정한 상관 — 진짜 성분끼리의 상관 추정치(과대추정 가능, 참고용)."""
+    if not (np.isfinite(reliability_a) and np.isfinite(reliability_b)):
+        return np.nan
+    denom = np.sqrt(reliability_a * reliability_b)
+    if not np.isfinite(denom) or denom <= 0:
+        return np.nan
+    return float(np.clip(r_observed / denom, -1, 1))
+
+
+def disattenuated_matrix(corr_df: pd.DataFrame, reliability: dict) -> pd.DataFrame:
+    """[오류8] C1 원 상관행렬을 신뢰도로 감쇠보정한 버전. 원본과 나란히 제시할 것."""
+    keys = list(corr_df.index)
+    mat = corr_df.copy().astype(float)
+    rel_vals = {k.replace("_dev", ""): _reliability_value(reliability.get(k.replace("_dev", ""), {}))
+               for k in keys}
+    for i in keys:
+        ri = rel_vals.get(i.replace("_dev", ""), np.nan)
+        for j in keys:
+            if i == j:
+                continue
+            rj = rel_vals.get(j.replace("_dev", ""), np.nan)
+            mat.loc[i, j] = disattenuated_corr(corr_df.loc[i, j], ri, rj)
+    return mat

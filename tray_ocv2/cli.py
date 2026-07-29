@@ -110,10 +110,35 @@ def cmd_run(args):
                         (rest.to_markdown(index=False) if len(rest) else "(없음)") + "\n")
 
     tri = indicators.triangulate(df)
-    print("\n[C1] within-tray 상관행렬:")
+    print("\n[C1] within-tray 상관행렬 (원본 — 신뢰도 보정 전, 감쇠 가능):")
     print(tri.to_string() if len(tri) else "(계산 불가 — S_A/S_B/S_C 컬럼 부족)")
-    report_lines.append("### C1 상관행렬\n\n" +
+    report_lines.append("### C1 상관행렬 (원본)\n\n" +
                         (tri.to_markdown() if len(tri) else "(없음)") + "\n")
+
+    rel = indicators.reliability_report(df)
+    print("\n[C1-신뢰도] 오류8 — 상관계수는 신뢰도가 낮으면 자동으로 0쪽으로 감쇠된다:")
+    _print_dict(rel)
+    report_lines.append(f"### C1 신뢰도 추정 (오류8)\n\n```\n{rel}\n```\n")
+
+    if len(tri):
+        dis = indicators.disattenuated_matrix(tri, rel)
+        print("\n[C1-보정] 신뢰도로 보정한 상관행렬 (진짜 성분 상관의 추정치, 과대추정 가능):")
+        print(dis.to_string())
+        report_lines.append("### C1 감쇠보정 상관행렬\n\n" + dis.to_markdown() + "\n")
+
+    hot_summary = {
+        ind.key: {
+            "고온노출_중앙값(h)": round(float(df[f"{ind.key}_hot_hours"].median()), 2)
+            if f"{ind.key}_hot_hours" in df.columns else None,
+            "율_원본_중앙값(mV/day)": round(float(df[f"{ind.key}_rate"].median()), 4)
+            if f"{ind.key}_rate" in df.columns and df[f"{ind.key}_rate"].notna().any() else None,
+            "율_아레니우스등가_중앙값(mV/day)": round(float(df[f"{ind.key}_rate_arrhenius"].median()), 4)
+            if f"{ind.key}_rate_arrhenius" in df.columns and df[f"{ind.key}_rate_arrhenius"].notna().any() else None,
+        } for ind in schema.INDICATORS
+    }
+    print("\n[K5/오류9] 지표별 고온노출시간·아레니우스 등가율 (Ea=54kJ/mol 가정, 민감도 확인 필요):")
+    _print_dict(hot_summary)
+    report_lines.append(f"### 아레니우스 등가율 (오류9, Ea=54kJ/mol 가정)\n\n```\n{hot_summary}\n```\n")
 
     c2 = indicators.cross_check_grade(df)
     print("\n[C2] 등급 E 셀의 S_A/S_B 준독립 대조:")
@@ -127,31 +152,64 @@ def cmd_run(args):
         f0 = fan.stage_field_reproducibility(df, temp_cols)
         print("[F0] 단계 간 온도 필드 재현성 상관행렬 (일부):")
         print(f0.iloc[:8, :8].to_string() if len(f0) else "(없음)")
-        report_lines.append("## F. 팬 서명 검증\n\n### F0 온도 필드 재현성\n\n" +
+        report_lines.append("## F. 팬 서명 검증\n\n### F0 온도 필드 재현성 (원본)\n\n" +
                             (f0.to_markdown() if len(f0) else "(없음)") + "\n")
 
-        main_temp = "t_ocv2" if "t_ocv2" in df.columns else temp_cols[0]
+        cluster = fan.cluster_reproducibility(f0) if len(f0) else {}
+        print("\n[F0-판정/오류7] 군집별 재현성 — '모든 스텝이 같아야' 가 아니라 "
+             "'열이력이 같은 스텝끼리만' 재현되어야 한다:")
+        _print_dict(cluster)
+        report_lines.append(f"### F0 판정 — 군집별 재현성 (오류7)\n\n```\n{cluster}\n```\n")
+
+        temp_groups = fan.classify_temp_cols(temp_cols)
+        recent_heat_cols = [c for c in temp_groups.get("recent_heat", []) if c.startswith("t_")]
+        main_temp = (recent_heat_cols[0] if recent_heat_cols
+                    else ("t_ocv2" if "t_ocv2" in df.columns else temp_cols[0]))
+
         f1 = fan.row_profile(df, main_temp)
-        print(f"\n[F1] 세로 프로파일 ({main_temp}):")
+        print(f"\n[F1] 세로 프로파일 ({main_temp}, recent_heat 단계 중 선택):")
         print(f1.to_string(index=False))
         report_lines.append(f"### F1 세로 프로파일 ({main_temp})\n\n" +
                             f1.to_markdown(index=False) + "\n")
 
-        profiles = fan.band_column_profile(df, main_temp)
+        profiles = fan.band_column_profile(df, main_temp, detrend=True)
         sim = fan.band_similarity(profiles)
-        print(f"\n[F2] ★판결문 — 밴드 유사도 ({main_temp}):")
+        print(f"\n[F2] 밴드 유사도 ({main_temp}, 테두리거리 detrend 적용):")
         _print_dict(sim)
         report_lines.append(f"### F2 밴드 유사도 ({main_temp})\n\n```\n{sim}\n```\n")
 
+        minima = fan.predicted_minima_check(profiles)
+        print(f"\n[F2-판결문/오류6] 도면 예측 열(FAN_COL_COLD_OUTER/MIDDLE) 직접 검정:")
+        _print_dict(minima)
+        report_lines.append(f"### F2 판결문 — 예측 열 검정 (오류6)\n\n```\n{minima}\n```\n")
+
+        no_heat_cols = [c for c in schema_no_heat_cols(df)
+                        if fan.classify_temp_cols([c]).get("separate_instrument") is None]
         f3 = fan.amplitude_vs_heat(
-            df, no_heat_cols=[c for c in schema_no_heat_cols(df)],
+            df, no_heat_cols=no_heat_cols,
             heat_cols=[c for c in ("temp_charge1_mean", "temp_discharge1_mean")
                       if c in df.columns])
-        print("\n[F3] 발열 유무에 따른 진폭 비교:")
+        print("\n[F3-구버전] 발열 유무 이분법 진폭 비교 (참고용, LCI 등 별도설비 제외):")
         _print_dict(f3)
-        report_lines.append(f"### F3 진폭 vs 발열\n\n```\n{f3}\n```\n")
+        report_lines.append(f"### F3 진폭 vs 발열 — 이분법 참고용\n\n```\n{f3}\n```\n")
 
-        # 그림: OCV2 온도 필드 (평균 + 팬 오버레이)
+        rise_cols = []
+        for prefix, n_max in (("charge", 7), ("discharge", 7)):
+            for n in range(1, n_max + 1):
+                key = f"{prefix}{n}"
+                rise_cols.append((f"temp_{key}_mean", f"temp_{key}_min",
+                                 f"temp_{key}_max", key))
+        reg = fan.heat_vs_amplitude_regression(df, rise_cols)
+        reg_summary = {k: v for k, v in reg.items() if k != "table"}
+        print("\n[F3-판정/오류10] ★발열량 대 진폭 연속 회귀 (이분법 대체):")
+        print(reg.get("table").to_string(index=False) if "table" in reg else "(없음)")
+        _print_dict(reg_summary)
+        report_lines.append(
+            "### F3 판정 — 발열량 vs 진폭 회귀 (오류10)\n\n"
+            + (reg["table"].to_markdown(index=False) if "table" in reg else "")
+            + f"\n\n```\n{reg_summary}\n```\n")
+
+        # 그림: 대표 recent_heat 단계 온도 필드 (평균 + 팬 오버레이)
         field = position_field(
             df.assign(_dev=df[main_temp] - df.groupby("tray_id")[main_temp].transform("median")),
             "_dev", agg="mean")

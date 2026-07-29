@@ -82,11 +82,28 @@ FAN_BANDS = [
 FAN_ROW_MAX = [3, 6, 10]        # 팬 축 아래 = 냉각 최강 = 차가움
 FAN_ROW_MIN = [1, 4, 5, 8, 12]  # 팬 사이(4.5·8.3) + 배열 바깥(1·12) = 냉각 최약
 
-#: [F2] 예측 — 알파벳 축(가로) 프로파일. **밴드마다 주기가 다른 것이 판별점.**
-#:   상단·하단 밴드(주기 3.2): 극소 ≈ C/D, G, J
-#:   중앙 밴드(주기 2.3)     : 극소 ≈ C, E, H, J   ← 상단·하단과 달라야 팬 확정
-FAN_COL_MIN_OUTER = ["D", "G", "J"]
-FAN_COL_MIN_MIDDLE = ["C", "E", "H", "J"]
+
+def _fan_center_columns(col_centers: list[float]) -> list[str]:
+    """도면 팬 중심 좌표(숫자)를 가장 가까운 열 라벨(A~L)로 반올림한다.
+
+    ★수정 이력: 이전 버전은 팬 '사이(gap)' 열(예: D,G,J)을 손으로 계산해 '냉각 최강'으로
+    잘못 라벨링했다. 행 축(FAN_ROW_MAX)은 처음부터 '팬 중심 = 차가움' 규약을 썼는데
+    열 축만 반대(gap=차가움)로 만든 것 — 두 축의 물리 규약이 안 맞았다.
+    이 함수로 col_centers 에서 직접 계산해 **행 축과 동일한 규약**(팬 중심에 가장 가까운
+    열이 냉각 최강)을 강제한다. 합성 데이터(정답을 아는 검증)로 이 불일치를 발견했다.
+    """
+    cols = []
+    for c in col_centers:
+        idx = max(1, min(N_COLS, int(round(c))))
+        cols.append(chr(ord("A") + idx - 1))
+    return cols
+
+
+#: [F2] 예측 — 알파벳 축(가로) 프로파일에서 **냉각 최강(차가움)** 으로 예측되는 열.
+#: 팬 중심에 가장 가까운 열 = 차가움 (FAN_ROW_MAX 와 동일 규약). col_centers 에서
+#: 직접 계산 — 밴드마다 주기가 다른 것이 판별점(상/하단은 3.2 주기, 중앙은 2.3 주기).
+FAN_COL_COLD_OUTER = _fan_center_columns(FAN_BANDS[0]["col_centers"])   # 상·하단 밴드
+FAN_COL_COLD_MIDDLE = _fan_center_columns(FAN_BANDS[1]["col_centers"])  # 중앙 밴드
 
 
 def parse_cell_pos(s: str) -> tuple[int, int] | None:
@@ -311,6 +328,46 @@ INDICATORS = [
     Indicator("S_B", "자기방전 B (고온2 구간)", "ocv4", "ocv5", 70.0, "ht2"),
     Indicator("S_C", "자기방전 C (전용OCV = 현 판정값)", "prvt1", "prvt3", 30.0, None),
 ]
+
+# ---------------------------------------------------------------------------
+# [오류7] OCV 단계의 직전 열이력 분류 — docs/04_logic_audit.md 오류7
+# ---------------------------------------------------------------------------
+# F0(온도 필드 재현성)의 옛 기준("모든 스텝에서 같은 무늬여야 한다")은 F3(발열이 있어야
+# 구배가 드러난다)과 모순된다. 실측(Run #1)도 OCV1·3·5(에이징/휴지 직후 열평형) 와
+# OCV2·4·6·7(충방전 직후 잔열) 두 군집으로 깨끗이 갈렸다 — F3이 맞고 옛 F0 기준이 틀렸다.
+# 이 분류는 "그때 열이 있었는가"라는 공정 순서상의 사실에서 정하며, 상관행렬 결과를
+# 보고 나중에 끼워맞추지 않는다(순환 방지).
+STAGE_THERMAL_STATE: dict = {
+    "ocv1": "equilibrium",       # 충전 전
+    "ocv2": "recent_heat",       # C1·C2 직후
+    "ocv3": "equilibrium",       # HT1 + RT2 후
+    "ocv4": "recent_heat",       # C3·C4 직후
+    "ocv5": "equilibrium",       # HT2 + RT3 후
+    "ocv6": "recent_heat",       # C5·C6·C7 직후 (만충)
+    "ocv7": "recent_heat",       # D1~D7 직후
+    "prvt1": "separate_instrument",
+    "prvt2": "separate_instrument",
+    "prvt3": "separate_instrument",
+}
+
+
+def classify_thermal_state(therm_key: str) -> str:
+    """[오류7] 컬럼명에서 뽑은 bare key(예: 'ocv2', 'charge1')로 열이력 분류를 얻는다.
+
+    반환: 'recent_heat' | 'equilibrium' | 'separate_instrument' | 'unknown'
+    """
+    if therm_key in STAGE_THERMAL_STATE:
+        return STAGE_THERMAL_STATE[therm_key]
+    step = next((t for t in THERM_STEPS if t.key == therm_key), None)
+    if step is None:
+        return "unknown"
+    if step.phase == "lci":
+        # 실측(F3) 근거: LCI 진폭이 다른 모든 계열과 무관하게 유독 크다(±4.6~4.8) →
+        # 충방전기와 무관한 별도 검사설비 고유 패턴으로 추정.
+        return "separate_instrument"
+    if step.self_heating:
+        return "recent_heat"
+    return "unknown"
 
 # ---------------------------------------------------------------------------
 # 판정 로직 (현행)

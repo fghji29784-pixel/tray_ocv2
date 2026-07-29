@@ -76,7 +76,7 @@ def aging_hours(df: pd.DataFrame, aging_key: str) -> pd.Series:
 
 
 def high_temp_exposure_hours(df: pd.DataFrame) -> pd.Series:
-    """[K5/K8 입력] HT#01 + HT#02 총 노출시간. 아레니우스 분해의 핵심 입력."""
+    """[K5/K8 입력] HT#01 + HT#02 총 노출시간(합산). 지표별 분리는 indicator_high_temp_hours."""
     total = pd.Series(0.0, index=df.index)
     any_present = False
     for a in schema.AGING_HIGH:
@@ -85,6 +85,44 @@ def high_temp_exposure_hours(df: pd.DataFrame) -> pd.Series:
             total = total.add(h.fillna(0), fill_value=0)
             any_present = True
     return total if any_present else pd.Series(np.nan, index=df.index)
+
+
+def indicator_high_temp_hours(df: pd.DataFrame, indicator_key: str) -> pd.Series:
+    """[오류9 수정] 해당 지표 구간에 포함된 고온에이징 '전용' 노출시간.
+
+    구 high_temp_exposure_hours() 는 HT1+HT2 를 합산해 S_A/S_B 지표별 구분이
+    없었다. S_A 구간엔 HT1만, S_B 구간엔 HT2만 들어간다 — 실측(Run #1)에서
+    HT1(중앙값 6.0h)과 HT2(18.0h)가 3배 차이나므로 합산은 부적절하다(docs/04_logic_audit
+    오류9). schema.Indicator.hot_aging(S_A→ht1, S_B→ht2)로 지표별 정확히 분리한다.
+
+    ⚠️ hot_aging 매핑은 문서상 공정 순서를 믿고 적은 가정이다. infer_process_order()
+    로 실측 확인 전까지는 참고용으로 쓸 것.
+    """
+    ind = next((i for i in schema.INDICATORS if i.key == indicator_key), None)
+    if ind is None or ind.hot_aging is None:
+        return pd.Series(0.0, index=df.index)
+    return aging_hours(df, ind.hot_aging)
+
+
+def arrhenius_normalize(delta_mv: pd.Series, hot_hours: pd.Series, other_hours: pd.Series,
+                        ea_kj: float = 54.0, hot_temp_c: float = schema.HIGH_TEMP_C,
+                        ref_temp_c: float = schema.ROOM_TEMP_C) -> pd.Series:
+    """[오류9 수정] 서로 다른 가혹도의 구간을 상온-환산 등가시간으로 정규화한 율(mV/day).
+
+    hot_hours(고온 60°C) 를 ref_temp_c(상온) 기준 등가시간으로 환산해 other_hours(상온)와
+    합산한 뒤 delta_mv 를 그 등가시간으로 나눈다. 이래야 S_A(HT1=6h)와 S_B(HT2=18h)처럼
+    노출시간이 다른 지표를 같은 자에 놓고 비교할 수 있다.
+
+    ⚠️ ea_kj(활성화에너지, 기본 54 kJ/mol)는 문헌 범위(대략 40~70)의 중간값 가정이다.
+    실측 검증 전이므로 이 값에 따라 등가시간이 크게 달라질 수 있다 — 결론 낼 때
+    ea_kj 를 몇 가지 값으로 바꿔가며 민감도를 반드시 같이 봐야 한다(과장 금지).
+    """
+    R = 8.314
+    hot_k = hot_temp_c + 273.15
+    ref_k = ref_temp_c + 273.15
+    accel = np.exp((ea_kj * 1000.0 / R) * (1.0 / ref_k - 1.0 / hot_k))
+    equiv_hours = other_hours.fillna(0) + hot_hours.fillna(0) * accel
+    return delta_mv / (equiv_hours.where(equiv_hours > 0) / 24.0)
 
 
 def indicator_hours(df: pd.DataFrame, indicator_key: str) -> pd.Series:

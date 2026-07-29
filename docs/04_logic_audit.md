@@ -160,3 +160,92 @@ HT 구간에 온도 컬럼이 없고, 그 앞뒤(OCV#03 등)는 이미 상온으
 
 **`I3`(spike-in) 주의**: 인공 결함은 **트레이당 1셀만** 주입한다.
 여러 셀을 동시에 주입하면 트레이 mode/median 자체가 이동해 판정 기준이 흔들린다.
+
+---
+
+# 2차 감사 (2026-07-29, Run #1 실측 결과에 비춰 재검토) — 코드 구현 완료
+
+> `docs/05_run_log.md` Run #1(실 데이터) 결과를 보고 F/C 그룹 로직을 다시 뜯어본 결과.
+> 발견 5건 모두 **코드로 수정하고 합성 데이터(정답을 아는 검증)로 재확인**했다.
+
+## 오류 6 ★★ — F2 "판결문"이 팬을 고유하게 식별하지 못한다
+
+**문제**: `밴드1(세로1~4)`과 `밴드3(세로9~12)`은 **둘 다 가장자리**다. 팬과 무관한
+어떤 "가장자리 vs 중앙" 열전달 효과라도 `상단≈하단≠중앙`을 만든다.
+**실측(Run #1)이 오히려 팬 가설에 불리했다**: 중앙 밴드(팬 5개, 가장 밀도 높음)가
+F1 세로 프로파일에서 **가장 따뜻하게** 나왔다 — 팬 밀도 예측과 정반대.
+그리고 `schema.FAN_COL_MIN_OUTER/MIDDLE`(팬 고유 예측)은 코드 어디서도 검정된 적이
+없었다.
+
+**수정**:
+- `fan.edge_detrend()` — 테두리거리별 평균(등방 성분)을 뺀 잔차로 밴드 비교
+  (`band_column_profile(..., detrend=True)` 기본값)
+- `fan.predicted_minima_check()` — 예측 냉각 열의 평균이 detrend 잔차 기준
+  나머지보다 낮은지 **직접** 검정. `band_similarity`(상관)는 참고용으로 격하
+
+**부수 발견(수정 중 합성검증으로 드러남)**: `FAN_COL_MIN_OUTER/MIDDLE` 상수 자체가
+**팬 중심이 아니라 팬 사이 간격(gap) 열**로 손으로 잘못 계산돼 있었다(D,G,J는
+`col_centers`의 gap 중점이지 중심이 아님). 행 축(`FAN_ROW_MAX`="팬 중심=차가움")과
+반대 규약이 섞여 있었던 것 — 정답을 아는 합성 데이터에서 `predicted_minima_check`가
+세 밴드 전부 `colder_as_predicted: False`로 나와서 발견했다. `schema._fan_center_columns()`
+로 `col_centers`에서 직접 계산하도록 교체(`FAN_COL_COLD_OUTER/MIDDLE`), 합성 검증 후
+세 밴드 전부 `True`로 확인.
+
+## 오류 7 ★★ — F0과 F3이 서로 모순됐다
+
+**문제**: F0 옛 기준("팬은 상시 가동이므로 모든 스텝에서 같은 무늬여야 한다")과
+F3 기준("발열이 있어야 구배가 드러난다")은 동시에 참일 수 없다. 실측 F0가 답을
+줬다 — 온도 필드가 **`equilibrium`(OCV1·3·5, 에이징 직후 열평형)** 과
+**`recent_heat`(OCV2·4·6·7, 충방전 직후 잔열)** 두 군집으로 깨끗이 갈렸다
+(군집 내 |r|=0.96~0.997·0.70~0.97, 군집 간 |r|<0.3) — **F3이 맞고 F0 기준이 틀렸다.**
+
+**수정**: `schema.STAGE_THERMAL_STATE`/`classify_thermal_state()` 로 스텝을
+사전 분류(순환 방지 — 상관 보고 나중에 정하지 않음). `fan.cluster_reproducibility()`
+가 "군집 내 재현 vs 군집 간"으로 재판정한다. F1·F2도 `recent_heat` 단계로 한정해서
+돌리도록 `cli.py` 를 바꿨다(구버전은 임의로 `t_ocv2`를 썼음).
+
+## 오류 8 ★★ — C1의 무상관을 "신호 없음"으로 곧장 읽으면 안 된다
+
+**문제**: 상관계수는 신뢰도가 낮으면 자동으로 0쪽으로 감쇠된다
+(`관측상관 ≈ √(신뢰도_A×신뢰도_B) × 진짜상관`). 실측 스코어카드에서 **중간 OCV
+(LSB=0.1)가 전용OCV·docv7(LSB=0.001)보다 분해능이 100배 거칠다** — S_A의 신뢰도가
+낮을 강력한 정황이다. C1≈0이 "세 지표가 다른 걸 잰다"인지 "감쇠됐을 뿐"인지
+구분이 안 됐다.
+
+**수정**: `indicators.reliability_report()` — S_A/S_B는 성분 LSB로 양자화 잡음
+기반 신뢰도 **상한**(`quantization_reliability_bound`, 과대추정 가능·명시), S_C는
+PRVT 3점 반분신뢰도(`split_half_reliability_S_C`, Spearman-Brown). 그리고
+`disattenuated_matrix()` — 신뢰도로 보정한 상관행렬을 원본과 나란히 제시.
+공식은 `disattenuated_corr(0.5,0.25,0.25)=1.0(클립)`, `disattenuated_corr(0.3,0.5,0.5)=0.6`
+로 수치 검증.
+
+## 오류 9 ★ — 아레니우스 정규화가 선언만 되고 미구현이었다
+
+**문제**: `schema.Indicator.hot_aging`(S_A→ht1, S_B→ht2)을 선언만 해두고 코드 어디서도
+안 썼다. `timing.high_temp_exposure_hours()`도 HT1+HT2를 **합산**해 지표별 구분이
+없었다. 실측(Run #1): 고온에이징 #01(S_A 구간) 중앙값 **6.03시간** vs #02(S_B 구간)
+**18.03시간** — **3배 차이.** 정규화 없이 S_A·S_B를 나란히 비교한 것 자체가 부적절했다.
+
+**수정**: `timing.indicator_high_temp_hours()` — 지표별 `hot_aging` 매핑으로 정확히
+분리. `timing.arrhenius_normalize()` — 고온시간을 상온 등가시간으로 환산해
+`*_rate_arrhenius`(mV/day) 산출. Ea=54kJ/mol(문헌 범위 40~70 중간값) 가정을
+출력에 명시하고 민감도 확인이 필요함을 경고(과장 금지).
+
+## 오류 10 ★ — F3의 "발열 스텝" 이분법이 임의적이었다
+
+**문제**: 실측에서 `temp_charge1_mean`(0.360, "발열")이 `t_ocv1`(0.489, "무발열")보다
+진폭이 **작게** 나왔다 — "충·방전=발열"이라는 이분법이 1차 충전(전류 작음)에서 깨졌다.
+
+**수정**: `fan.heat_vs_amplitude_regression()` — 스텝 이름표가 아니라 **실제 발열량**
+(최고−최저 온도 중앙값)을 가로축, 필드 진폭(RMS)을 세로축으로 놓는 연속 회귀로 대체.
+구 이분법(`amplitude_vs_heat`)은 참고용으로 남기되, 호출부에서 `separate_instrument`
+(LCI 등)로 분류되는 스텝은 `fan.classify_temp_cols()` 로 자동 제외하도록 고쳤다.
+
+## 검증
+
+- 스모크 테스트 47건 전부 통과(`tests/test_pipeline.py`) — 신규 함수 전부 포함
+- **F2 예측열 검정**: 합성 데이터(정답 앎)에서 세 밴드 전부 `colder_as_predicted: True`
+  — `predicted_minima_check()` 자체와 (수정된) `FAN_COL_COLD_*` 상수 둘 다 확인
+- `disattenuated_corr` 공식 수치 검증(클립·정상 케이스·NaN 전파)
+- CLI 전체 실행(`cli.py run`) 에러 없이 완주, 새 출력 섹션(C1-신뢰도·C1-보정·오류9 요약·
+  F0-판정·F2-판결문·F3-판정) 전부 정상 출력 확인
