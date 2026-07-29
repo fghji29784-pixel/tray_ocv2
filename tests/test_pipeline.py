@@ -371,6 +371,38 @@ def main():
         check("V5/V6/V7 파일 실제로 저장됨",
              all(os.path.exists(p) for p in v567_paths.values()), str(v567_paths))
 
+    # --- V8/V9/V10: 데이터 신뢰성 ---
+    with tempfile.TemporaryDirectory() as tmpdir:
+        v8910_paths = figures.fig_v8_v9_v10_all(df, tmpdir)
+        check("V8/V10 최소 생성", all(k in v8910_paths for k in ("v8", "v10")),
+             str(v8910_paths))
+        check("V8/V9/V10 파일 실제로 저장됨",
+             all(os.path.exists(p) for p in v8910_paths.values()), str(v8910_paths))
+
+    # --- V11: 공정 타임라인 ---
+    with tempfile.TemporaryDirectory() as tmpdir:
+        v11_path = figures.fig_v11_process_timeline(df, tmpdir)
+        check("V11 파일 실제로 저장됨", os.path.exists(v11_path), v11_path)
+
+    # --- V12/V13: 자기방전 지표 ---
+    with tempfile.TemporaryDirectory() as tmpdir:
+        v1213_paths = figures.fig_v12_v13_all(df, tmpdir)
+        check("V12/V13 2장 전부 생성", len(v1213_paths) == 2, str(v1213_paths))
+        check("V12/V13 파일 실제로 저장됨",
+             all(os.path.exists(p) for p in v1213_paths.values()), str(v1213_paths))
+
+    # --- V16/S4 ---
+    with tempfile.TemporaryDirectory() as tmpdir:
+        v16s4_paths = figures.fig_v16_s4_all(df, tmpdir)
+        check("V16/S4 2장 전부 생성", len(v16s4_paths) == 2, str(v16s4_paths))
+        check("V16/S4 파일 실제로 저장됨",
+             all(os.path.exists(p) for p in v16s4_paths.values()), str(v16s4_paths))
+
+    # --- V0: 종합 대시보드 ---
+    with tempfile.TemporaryDirectory() as tmpdir:
+        v0_path = figures.fig_v0_dashboard(df, tmpdir)
+        check("V0 파일 실제로 저장됨", os.path.exists(v0_path), v0_path)
+
     print(f"\n{'='*40}")
     if FAILS:
         print(f"FAIL {len(FAILS)}건: {FAILS}")

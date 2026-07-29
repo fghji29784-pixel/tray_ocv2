@@ -417,6 +417,34 @@ def cmd_figures(args):
     for name, path in paths.items():
         print(f"[저장] {name}: {path}")
 
+    print("\n=== [V8/V9/V10] 데이터 신뢰성 그림 ===")
+    paths = figures.fig_v8_v9_v10_all(df, fig_dir)
+    for name, path in paths.items():
+        print(f"[저장] {name}: {path}")
+
+    print("\n=== [V11] 공정 타임라인 ===")
+    try:
+        print(f"[저장] v11: {figures.fig_v11_process_timeline(df, fig_dir)}")
+    except ValueError as e:
+        print(f"(건너뜀: {e})")
+
+    if "docv7_raw" in df.columns:
+        print("\n=== [V12/V13] 자기방전 지표 그림 ===")
+        paths = figures.fig_v12_v13_all(df, fig_dir)
+        for name, path in paths.items():
+            print(f"[저장] {name}: {path}")
+
+        print("\n=== [V16/S4] 위치별불량률·측정단계군집 그림 ===")
+        paths = figures.fig_v16_s4_all(df, fig_dir)
+        for name, path in paths.items():
+            print(f"[저장] {name}: {path}")
+
+        print("\n=== [V0] 종합 대시보드 ===")
+        try:
+            print(f"[저장] v0: {figures.fig_v0_dashboard(df, fig_dir)}")
+        except ValueError as e:
+            print(f"(건너뜀: {e})")
+
 
 def schema_no_heat_cols(df: pd.DataFrame):
     for key in schema.NO_HEAT_STEPS:

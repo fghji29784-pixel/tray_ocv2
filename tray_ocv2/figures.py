@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import os
 
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.ticker import FuncFormatter, NullFormatter
 
-from . import fan, fields, impact, indicators, patterns, schema, spatial, style, timing
+from . import fan, fields, impact, indicators, patterns, qc, schema, spatial, style, timing
 
 # ---------------------------------------------------------------------------
 # S1 — 전체 지문 갤러리 (OCV·온도 × 원본·정규화, 4장)
@@ -49,6 +50,23 @@ _FAMILY_META = {
         "unit_label": "°C", "name_kr": "온도",
     },
 }
+
+
+def _fix_log_axis(ax, values) -> None:
+    """로그축 막대그림 공용 보정.
+
+    ① matplotlib 로그축 막대는 축 하단을 '데이터 최솟값 바로 아래'로 자동확대해,
+    비슷한 자릿수의 값들도 막대 하나만 극단적으로 작아 보이는 착시를 만든다(실측
+    확인) — 최솟값보다 한 자릿수 아래로 하단을 고정한다.
+    ② 로그축 기본 지수표기(예 10^-1, 보조눈금 포함)는 mathtext 로 그려지는데, 이
+    mathtext 폰트가 unicode 마이너스(U+2212) 글리프를 못 찾아 경고+깨진 기호로
+    나온다(실측 확인 — 주눈금만 바꿔선 안 없어지고 보조눈금 포매터도 꺼야 했다).
+    """
+    positive = [v for v in values if v > 0]
+    bottom = 10 ** (np.floor(np.log10(min(positive))) - 1) if positive else 1e-6
+    ax.set_ylim(bottom=bottom)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"{v:g}"))
+    ax.yaxis.set_minor_formatter(NullFormatter())
 
 
 def _field_for_spec(df: pd.DataFrame, col: str, normalized: bool) -> pd.DataFrame:
@@ -821,17 +839,7 @@ def fig_v6_indicator_premise(df: pd.DataFrame, outdir: str) -> str:
     mvals = [mags[k] for k in mlabels]
     axes[1].bar(mlabels, mvals, color=style.C["accent"], zorder=3)
     axes[1].set_yscale("log")
-    # matplotlib 로그축 막대는 기본적으로 축 하단을 '데이터 최솟값 바로 아래'로
-    # 딱 맞춰 자동확대한다 — 세 지표가 실제로는 같은 자릿수(예 25% 이내)인데도
-    # 막대 하나만 축 하단에 거의 붙어 나머지보다 훨씬 작아 보이는 착시가 생긴다
-    # (실측 확인). 최솟값보다 한 자릿수 아래로 하단을 고정해 시각적으로 정직하게 만든다.
-    bottom = 10 ** (np.floor(np.log10(min(mvals))) - 1)
-    axes[1].set_ylim(bottom=bottom)
-    # 로그축 기본 지수표기(예 10^-1, 보조눈금 포함)는 mathtext 로 그려지는데, 이
-    # mathtext 폰트가 unicode 마이너스(U+2212) 글리프를 못 찾아 경고+깨진 기호로
-    # 나온다(실측 확인 — 주눈금만 바꿔선 안 없어지고 보조눈금 포매터도 꺼야 했다).
-    axes[1].yaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"{v:g}"))
-    axes[1].yaxis.set_minor_formatter(NullFormatter())
+    _fix_log_axis(axes[1], mvals)
     axes[1].set_ylabel("실제 강하량 중앙값 |값| (mV, 로그축)")
 
     style.verdict_badge(fig, "neutral")
@@ -891,4 +899,470 @@ def fig_v567_all(df: pd.DataFrame, outdir: str, main_temp_col: str | None = None
         profiles = fan.band_column_profile(df, main_temp_col, detrend=True)
         minima = fan.predicted_minima_check(profiles)
         out["v7"] = fig_v7_fan_mismatch(minima, outdir)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# V0 — 종합 대시보드 (다른 결과가 다 나온 뒤 조립)
+# ---------------------------------------------------------------------------
+
+
+def fig_v0_dashboard(df: pd.DataFrame, outdir: str, value_col: str = "docv7_raw",
+                     main_temp_col: str | None = None) -> str:
+    """V0 — 지금까지 확인한 모든 인자의 판정 영향도를 한 장에 모은다.
+
+    막대 길이는 서로 다른 단위(분산기여 % vs 상관계수 r)를 억지로 한 축에 놓은
+    **대략적** 비교용이다 — 정확한 값은 항상 막대 끝 글자로 병기한다(과장 방지).
+    """
+    d = df.copy()
+    if not all(c in d.columns for c in ("S_A", "S_B", "S_C")):
+        d = indicators.compute(d)
+    d = indicators.tray_relative(d)
+
+    vardecomp = spatial.variance_decomposition(d, value_col)
+    if not vardecomp.get("ok"):
+        raise ValueError(f"분산분해 실패 - V0 계산 불가: {vardecomp}")
+    fixed_pct = vardecomp["frac_position_fixed"] * 100
+    eof_pct = vardecomp["frac_tray_position_eof"] * 100
+    resid_pct = vardecomp["frac_cell_residual"] * 100
+    position_pct = fixed_pct + eof_pct
+
+    reg = fan.heat_vs_amplitude_regression(d, _default_rise_stat_cols())
+    heat_r = reg.get("corr") if reg.get("ok") else None
+
+    k3 = timing.aging_duration_bias_check(d)
+    time_r = k3.get("corr_hours_vs_failrate") if k3.get("ok") else None
+
+    tri = indicators.triangulate(d)
+    sab_r = None
+    if "S_A_dev" in tri.index and "S_B_dev" in getattr(tri, "columns", []):
+        v = tri.loc["S_A_dev", "S_B_dev"]
+        sab_r = float(v) if np.isfinite(v) else None
+
+    if main_temp_col is None:
+        main_temp_col = next((c for c in ("t_ocv2", "t_ocv4") if c in d.columns), None)
+    fan_match_txt = "확인 불가"
+    if main_temp_col:
+        profiles = fan.band_column_profile(d, main_temp_col, detrend=True)
+        minima = fan.predicted_minima_check(profiles)
+        band_results = {k: v for k, v in minima.items() if k != "note"}
+        if band_results:
+            n_match = sum(1 for v in band_results.values() if v["colder_as_predicted"])
+            fan_match_txt = f"예측 {n_match}/{len(band_results)} 일치"
+
+    rows = [
+        {"label": "셀 자체의 차이\n(진짜 불량 신호)", "bar": resid_pct,
+         "text": f"{resid_pct:.1f}% (분산 기여)", "level": "high"},
+        {"label": "자리(위치)", "bar": position_pct,
+         "text": f"{position_pct:.1f}% ({fixed_pct:.1f} 고정 + {eof_pct:.1f} 트레이별)",
+         "level": "high",
+         "callout": "이 몫은 현재 판정에서 전혀 보정되지 않습니다"},
+    ]
+    if heat_r is not None:
+        rows.append({"label": "발열·냉각 불균일", "bar": abs(heat_r) * 100,
+                    "text": f"r={heat_r:.2f} (온도 경로)", "level": "high_soft"})
+    if time_r is not None:
+        rows.append({"label": "에이징 시간 편차", "bar": abs(time_r) * 100,
+                    "text": f"r={time_r:.2f}", "level": "neutral"})
+    if sab_r is not None:
+        rows.append({"label": "S_A·S_B (이완 지표)", "bar": abs(sab_r) * 100,
+                    "text": f"상관 r={sab_r:.2f}", "level": "neutral"})
+    rows.append({"label": "팬 배열 특정 패턴", "bar": 6, "text": fan_match_txt,
+                "level": "accent"})
+
+    fig, ax = style.kind_fig(
+        "무엇이 불량 판정에 영향을 주는지 전부 확인했습니다",
+        "가로 막대가 길수록 판정에 큰 영향입니다. 퍼센트(분산 기여)와 상관계수(r)는 "
+        "단위가 달라 막대 길이는 대략적 비교용이며, 정확한 값은 막대 끝 글자를 보세요.",
+        figsize=(10.8, 1.2 + 0.75 * len(rows)), top=0.80)
+
+    y = np.arange(len(rows))
+    bars = [r["bar"] for r in rows]
+    colors = [style.VERDICT_LEVELS[r["level"]][1] for r in rows]
+    ax.barh(y, bars, color=colors, height=0.6, zorder=3)
+    ax.set_yticks(y, [r["label"] for r in rows])
+    ax.invert_yaxis()
+    for yi, r in zip(y, rows):
+        ax.text(r["bar"] + 2.0, yi, r["text"], va="center", fontsize=9.8)
+        if "callout" in r:
+            style.note(ax, r["callout"], xy=(r["bar"], yi),
+                      xytext=(min(r["bar"] + 28, 62), yi - 0.9), color=style.C["high"])
+    ax.set_xlim(0, 100)
+    ax.set_xlabel("영향 규모 (%, 상관계수는 |r|×100 — 막대는 대략적 비교용)")
+
+    legend_handles = [mpatches.Patch(color=c, label=t)
+                     for t, c in style.VERDICT_LEVELS.values()]
+    ax.legend(handles=legend_handles, loc="lower right", fontsize=9)
+
+    path = os.path.join(outdir, "V0_인자_판정영향도_종합.png")
+    return style.save(fig, path)
+
+
+# ---------------------------------------------------------------------------
+# V8/V9/V10 — A 그룹(데이터 신뢰성), 발표 도입부 "믿을 수 있는 데이터인가"
+# ---------------------------------------------------------------------------
+
+
+def fig_v8_score_card(df: pd.DataFrame, outdir: str) -> str:
+    """V8 — 주요 컬럼 결측률·분해능·표본수 신호등 표."""
+    sc = qc.score_card(df)
+    if sc.empty:
+        raise ValueError("score_card 결과 없음 - V8 계산 불가")
+
+    fig, ax = style.kind_fig(
+        "먼저 이 데이터를 믿어도 되는지 확인했습니다",
+        "초록/노랑/빨강은 결측률 기준 신호등입니다(낮을수록 좋음). 분해능·표본수는 참고용으로 병기합니다.",
+        figsize=(9.2, 1.1 + 0.55 * len(sc)), top=0.74)
+    ax.axis("off")
+
+    cols = ["항목", "결측률(%)", "분해능(LSB)", "표본수"]
+    cell_text, cell_colors = [], []
+    for _, row in sc.iterrows():
+        if "상태" in sc.columns and pd.notna(row.get("상태")):
+            cell_text.append([row["항목"], row["상태"], "-", "-"])
+            cell_colors.append(["white"] * 4)
+            continue
+        miss = row["결측률(%)"]
+        color = "#DCEFDC" if miss < 1 else "#FCEBC5" if miss < 5 else "#F6D0CE"
+        cell_text.append([row["항목"], f"{miss:.2f}", f"{row['분해능(LSB)']:.5g}",
+                         f"{int(row['표본수'])}"])
+        cell_colors.append([color, color, "white", "white"])
+
+    table = ax.table(cellText=cell_text, colLabels=cols, cellColours=cell_colors,
+                     cellLoc="center", loc="center")
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 1.9)
+
+    style.observation_tag(fig)
+    path = os.path.join(outdir, "V8_스코어카드.png")
+    return style.save(fig, path)
+
+
+def fig_v9_measurement_resolution(df: pd.DataFrame, outdir: str,
+                                  prvt_col: str = "v_prvt1", mid_col: str = "v_ocv1") -> str:
+    """V9 — 전용 계측기 vs 중간 측정 분해능(LSB) 비교."""
+    if prvt_col not in df.columns or mid_col not in df.columns:
+        raise ValueError(f"{prvt_col}/{mid_col} 컬럼 없음 - V9 계산 불가")
+    lsb_prvt = qc.lsb_estimate(df[prvt_col])
+    lsb_mid = qc.lsb_estimate(df[mid_col])
+    if not (np.isfinite(lsb_prvt) and np.isfinite(lsb_mid)) or lsb_prvt <= 0:
+        raise ValueError("분해능 추정 실패 - V9 계산 불가")
+    ratio = lsb_mid / lsb_prvt
+
+    fig, ax = style.kind_fig(
+        f"전용 계측기는 중간 측정보다 {ratio:.0f}배 정밀합니다",
+        "막대 높이는 분해능(LSB, 원 단위, 로그축)입니다. 낮을수록 더 작은 변화까지 "
+        "구분하는 정밀한 측정입니다.",
+        figsize=(7.4, 6.2), top=0.78)
+    xs = ["전용 계측기\n(PRVT)", "중간 측정\n(충방전기 내 OCV)"]
+    ys = [lsb_prvt, lsb_mid]
+    ax.bar(xs, ys, color=[style.C["accent"], style.C["neutral"]], width=0.5, zorder=3)
+    ax.set_yscale("log")
+    _fix_log_axis(ax, ys)
+    for x, y in zip(xs, ys):
+        ax.text(x, y * 1.4, f"{y:g}", ha="center", fontsize=11, fontweight="bold")
+    ax.set_ylabel("분해능 LSB (원 단위, 로그축)")
+
+    style.observation_tag(fig)
+    path = os.path.join(outdir, "V9_측정눈금.png")
+    return style.save(fig, path)
+
+
+def fig_v10_grade_consistency(df: pd.DataFrame, outdir: str) -> str:
+    """V10 — 현재 등급(A/E)이 현행 규칙(mode+offset)으로 얼마나 설명되는지."""
+    a7 = qc.grade_consistency(df)
+    if not a7.get("ok"):
+        raise ValueError(f"grade_consistency 실패 - V10 계산 불가: {a7}")
+    pct = a7["pct_grade_explained_by_rule"]
+
+    fig, ax = style.kind_fig(
+        f"현재 등급의 {pct:.0f}%만 지금 규칙(mode+{schema.JUDGE_OFFSET_MV}mV)으로 설명됩니다",
+        "막대 3개는 실제 불량(E) 판정과 현재 계산 규칙을 대조한 결과입니다.",
+        figsize=(8.6, 6.2), top=0.78)
+    labels = ["규칙+실제 모두\n불량 (일치)", "실제만 불량\n(규칙 밖 정보)",
+             "규칙만 불량\n(실제는 A로 남음)"]
+    values = [a7["both_fail"], a7["only_in_grade"], a7["only_in_computed"]]
+    colors = [style.C["accent"], style.C["high"], style.C["neutral"]]
+    ax.bar(labels, values, color=colors, width=0.55, zorder=3)
+    for lbl, v in zip(labels, values):
+        ax.text(lbl, v + max(values) * 0.02, f"{v}건", ha="center", fontsize=11,
+               fontweight="bold")
+    ax.set_ylabel("셀 수")
+
+    style.observation_tag(fig)
+    path = os.path.join(outdir, "V10_등급구성.png")
+    return style.save(fig, path)
+
+
+def fig_v8_v9_v10_all(df: pd.DataFrame, outdir: str) -> dict:
+    os.makedirs(outdir, exist_ok=True)
+    out = {}
+    try:
+        out["v8"] = fig_v8_score_card(df, outdir)
+    except ValueError:
+        pass
+    try:
+        out["v9"] = fig_v9_measurement_resolution(df, outdir)
+    except ValueError:
+        pass
+    try:
+        out["v10"] = fig_v10_grade_consistency(df, outdir)
+    except ValueError:
+        pass
+    return out
+
+
+# ---------------------------------------------------------------------------
+# V11 — K 그룹: 공정 타임라인 (비전문가에게 공정을 설명하는 유일한 그림)
+# ---------------------------------------------------------------------------
+
+
+def fig_v11_process_timeline(df: pd.DataFrame, outdir: str) -> str:
+    """V11 — 공정 순서·소요시간 타임라인(간트형)."""
+    order = timing.infer_process_order(df)
+    if order.empty:
+        raise ValueError("infer_process_order 결과 없음 - V11 계산 불가")
+
+    order = order.copy()
+    t0 = order["median_start"].min()
+    order["start_h"] = (order["median_start"] - t0).dt.total_seconds() / 3600.0
+
+    durations = []
+    for _, row in order.iterrows():
+        key, kind = row["key"], row["kind"]
+        if kind == "aging":
+            h = timing.aging_hours(df, key)
+            durations.append(float(h.median()) if h.notna().any() else 0.5)
+        elif kind in ("charge", "discharge", "lci"):
+            col = f"dur_{key}"
+            if col in df.columns and pd.to_numeric(df[col], errors="coerce").notna().any():
+                mins = pd.to_numeric(df[col], errors="coerce")
+                durations.append(float(mins.median()) / 60.0)
+            else:
+                durations.append(0.3)
+        else:   # voltage(OCV/PRVT) - 실측 1~2분, 표시용 최소폭만 준다
+            durations.append(0.05)
+    order["duration_h"] = durations
+
+    kind_labels = {"aging": "에이징", "voltage": "전압측정(OCV/PRVT)",
+                  "charge": "충전", "discharge": "방전", "lci": "LCI"}
+    kind_colors = {"aging": style.C["neutral"], "voltage": style.C["accent"],
+                  "charge": style.C["high"], "discharge": style.C["low"],
+                  "lci": style.C["high_soft"]}
+
+    n = len(order)
+    total_h = float(order["start_h"].max())
+    fig, ax = style.kind_fig(
+        f"이 랏이 약 {total_h:.0f}시간({total_h / 24:.1f}일) 동안 어떤 순서로 흘렀는지",
+        "막대 하나가 공정 스텝 하나입니다(왼쪽=시작이 빠름). 색은 스텝 종류입니다.",
+        figsize=(11.5, max(6.0, n * 0.24)), top=max(0.55, 1 - 1.3 / max(6.0, n * 0.24)))
+    y = np.arange(n)[::-1]
+    for yi, (_, row) in zip(y, order.iterrows()):
+        ax.barh(yi, max(row["duration_h"], total_h * 0.004), left=row["start_h"],
+               height=0.6, color=kind_colors.get(row["kind"], style.C["neutral"]), zorder=3)
+    ax.set_yticks(y, order["label"])
+    ax.tick_params(axis="y", labelsize=8)
+    ax.set_xlabel("경과 시간 (h, 첫 스텝 시작 기준)")
+
+    handles = [mpatches.Patch(color=kind_colors[k], label=kind_labels[k])
+              for k in kind_colors if k in set(order["kind"])]
+    ax.legend(handles=handles, loc="lower right", fontsize=9)
+
+    style.observation_tag(fig)
+    path = os.path.join(outdir, "V11_공정타임라인.png")
+    return style.save(fig, path)
+
+
+# ---------------------------------------------------------------------------
+# V12/V13 — C 그룹: 자기방전 지표 (꼬리일관성 · 가속 아님)
+# ---------------------------------------------------------------------------
+
+
+def _tail_halves(df: pd.DataFrame, top_frac: float = 0.01) -> pd.DataFrame:
+    d = df.copy()
+    d["_half1"] = d["v_prvt1"] - d["v_prvt2"]
+    d["_half2"] = d["v_prvt2"] - d["v_prvt3"]
+    d["_h1"] = fields.tray_delta(d, "_half1", stat="median")
+    d["_h2"] = fields.tray_delta(d, "_half2", stat="median")
+    d["_full"] = d["_h1"] + d["_h2"]
+    ok = d["_h1"].notna() & d["_h2"].notna()
+    sub = d[ok].copy()
+    n_tail = max(10, int(len(sub) * top_frac))
+    tail_idx = sub.nlargest(n_tail, "_full").index
+    sub["_is_tail"] = sub.index.isin(tail_idx)
+    return sub
+
+
+def fig_v12_tail_consistency(df: pd.DataFrame, outdir: str, top_frac: float = 0.01) -> str:
+    """V12 — 꼬리(상위 top_frac) 셀이 전반·후반 구간 모두에서 높은가."""
+    if not all(c in df.columns for c in ("v_prvt1", "v_prvt2", "v_prvt3")):
+        raise ValueError("PRVT2 컬럼 없음 - V12 계산 불가")
+    tail_stats = indicators.tail_consistency_check(df, top_frac=top_frac)
+    if not tail_stats.get("ok"):
+        raise ValueError(f"tail_consistency_check 실패 - V12 계산 불가: {tail_stats}")
+
+    sub = _tail_halves(df, top_frac=top_frac)
+    expected = max(tail_stats["expected_if_random"], 1e-9)
+    ratio = tail_stats["frac_tail_high_in_both_halves"] / expected
+
+    fig, ax = style.kind_fig(
+        "불량 의심 셀은 두 구간 모두에서 일관되게 새고 있습니다",
+        "점 하나가 셀 하나입니다. 빨간 점(꼬리 후보)이 오른쪽 위(두 구간 다 높음)에 "
+        f"몰려 있으면 우연이 아니라는 뜻입니다. (무작위 기대 대비 {ratio:.0f}배)",
+        figsize=(8.8, 6.6), top=0.80)
+
+    rest, tail = sub[~sub["_is_tail"]], sub[sub["_is_tail"]]
+    ax.scatter(rest["_h1"], rest["_h2"], s=8, color=style.C["neutral"], alpha=0.25,
+              label="나머지 셀", zorder=2)
+    ax.scatter(tail["_h1"], tail["_h2"], s=24, color=style.C["high"], alpha=0.85,
+              label=f"꼬리 후보(상위 {top_frac * 100:.0f}%)", zorder=3)
+    ax.axhline(0, color=style.C["rule"], lw=0.8, zorder=1)
+    ax.axvline(0, color=style.C["rule"], lw=0.8, zorder=1)
+    ax.set_xlabel("전반 구간 편차 (PRVT1-PRVT2, mV)")
+    ax.set_ylabel("후반 구간 편차 (PRVT2-PRVT3, mV)")
+    ax.legend(loc="upper left", fontsize=9)
+
+    style.verdict_badge(fig, "high")
+    style.chain_strip(fig, "value")
+    path = os.path.join(outdir, "V12_꼬리일관성.png")
+    return style.save(fig, path)
+
+
+def fig_v13_not_accelerating(tail_rate: dict, outdir: str) -> str:
+    """V13 — 꼬리 셀의 누설 속도가 구간 길이 보정 후에도 일정한지."""
+    if not tail_rate.get("ok"):
+        raise ValueError(f"tail_rate_check 실패 - V13 계산 불가: {tail_rate}")
+    raw_ratio = tail_rate["raw_mv_ratio_2_over_1"]
+    rate_ratio = tail_rate["rate_ratio_2_over_1"]
+    if not (np.isfinite(raw_ratio) and np.isfinite(rate_ratio)):
+        raise ValueError("비율 계산 불가(0 나눗셈 등) - V13 계산 불가")
+
+    fig, ax = style.kind_fig(
+        "누설 속도는 일정합니다 — 갑자기 나빠지는 게 아닙니다",
+        "왼쪽은 시간 보정 전(원시 mV) 비율, 오른쪽은 실제 경과시간으로 나눈 속도(mV/day) "
+        "비율입니다. 1에 가까울수록 '가속'이 아니라 구간 길이 차이였다는 뜻입니다.",
+        figsize=(8.2, 6.4), top=0.78)
+    xs = ["보정 전\n(raw mV 비율)", "시간 보정 후\n(mV/day 비율)"]
+    ys = [raw_ratio, rate_ratio]
+    ax.bar(xs, ys, color=[style.C["high"], style.C["accent"]], width=0.5, zorder=3)
+    ax.axhline(1.0, color=style.C["rule"], ls="--", lw=1.3, zorder=2,
+              label="비율=1 (가속 아님)")
+    for x, y in zip(xs, ys):
+        ax.text(x, y + max(ys, key=abs) * 0.03, f"{y:.1f}배", ha="center", fontsize=12,
+               fontweight="bold")
+    ax.legend()
+    ax.set_ylabel("후반 구간 / 전반 구간 비율")
+
+    style.verdict_badge(fig, "neutral")
+    style.chain_strip(fig, "value")
+    path = os.path.join(outdir, "V13_가속아님.png")
+    return style.save(fig, path)
+
+
+def fig_v12_v13_all(df: pd.DataFrame, outdir: str) -> dict:
+    os.makedirs(outdir, exist_ok=True)
+    out = {}
+    try:
+        out["v12"] = fig_v12_tail_consistency(df, outdir)
+    except ValueError:
+        pass
+    tail_rate = indicators.tail_rate_check(df)
+    try:
+        out["v13"] = fig_v13_not_accelerating(tail_rate, outdir)
+    except ValueError:
+        pass
+    return out
+
+
+# ---------------------------------------------------------------------------
+# V16 — I 그룹: 위치별 불량 판정률 배수 + 절대 개수
+# ---------------------------------------------------------------------------
+
+
+def fig_v16_position_failure_rate(df: pd.DataFrame, outdir: str,
+                                  grade_col: str = "grade",
+                                  small_n_threshold: int = 50) -> str:
+    """V16 — 위치별 불량 판정률 배수 지도 + 표본수(n) 병기(작으면 강조)."""
+    pfr = impact.position_failure_rate(df, grade_col=grade_col)
+    if not pfr.get("ok"):
+        raise ValueError(f"position_failure_rate 실패 - V16 계산 불가: {pfr}")
+
+    d = df.copy()
+    d["_is_fail"] = (d[grade_col].astype(str) == schema.GRADE_FAIL).astype(float)
+    count_field = fields.position_field(d, "_is_fail", agg="count")
+
+    fig, ax = style.kind_fig(
+        f"이 자리는 평균보다 최대 {pfr['max_ratio']:.1f}배 더 자주 불량 판정됩니다 "
+        f"(자리 {pfr['max_ratio_position']})",
+        "칸 하나가 셀 위치 하나. 색은 트레이 평균 불량률 대비 배수입니다. 칸 안 숫자는 "
+        "그 자리의 표본수(n) — 작으면(빨강) 배수가 우연히 커졌을 수 있습니다.",
+        figsize=(9.6, 8.0), top=0.84)
+    grid = pfr["ratio_field"].to_numpy()
+    style.tray_heatmap(ax, grid, unit="배", diverging=False, show_margin_axis=False,
+                      cbar_label="평균 대비 불량 판정 배수")
+
+    counts = count_field.to_numpy()
+    for r in range(fields.N_ROWS):
+        for c in range(fields.N_COLS):
+            n = counts[r, c]
+            if np.isfinite(n):
+                color = style.C["high"] if n < small_n_threshold else "#3A3F46"
+                ax.text(c, r, f"n={int(n)}", ha="center", va="center", fontsize=6.3,
+                       color=color)
+
+    style.verdict_badge(fig, "high")
+    style.chain_strip(fig, "verdict")
+    path = os.path.join(outdir, "V16_위치별불량률.png")
+    return style.save(fig, path)
+
+
+# ---------------------------------------------------------------------------
+# S4 — 측정 단계 두 계열 군집("현 상황", 관찰) — scipy 없이 상관행렬 히트맵으로 대체
+# ---------------------------------------------------------------------------
+
+
+def fig_s4_stage_cluster(df: pd.DataFrame, outdir: str) -> str:
+    """S4 — 온도 측정 단계들이 실제로 두 무리(잔열/열평형·별도계측기)로 갈리는지."""
+    temp_cols = [c for c in df.columns if c.startswith("t_")
+                or (c.startswith("temp_") and (c.endswith("_mean") or c.endswith("_single")))]
+    corr = fan.stage_field_reproducibility(df, temp_cols)
+    if corr.empty:
+        raise ValueError("상관행렬 계산 불가 - S4 계산 불가")
+
+    groups = fan.classify_temp_cols(list(corr.index))
+    order = []
+    for cat in ("recent_heat", "equilibrium", "separate_instrument", "unknown"):
+        order += [c for c in groups.get(cat, []) if c in corr.index]
+    order += [c for c in corr.index if c not in order]
+    corr_ordered = corr.loc[order, order]
+
+    n = len(order)
+    fig, ax = style.kind_fig(
+        "측정 단계들이 실제로 두 무리로 갈리는지 확인합니다",
+        "칸이 진한 빨강일수록 두 단계의 위치 지문이 닮았다는 뜻입니다. 왼쪽/위가 "
+        "'충방전 직후(잔열)', 오른쪽/아래가 '열평형·별도계측기' 단계로 미리 묶었습니다.",
+        figsize=(max(7.8, n * 0.42), max(7.2, n * 0.4)), top=0.80)
+    im = ax.imshow(corr_ordered.to_numpy(), cmap=style.CMAP_DIV, vmin=-1, vmax=1)
+    ax.set_xticks(range(n), order, rotation=90, fontsize=7.3)
+    ax.set_yticks(range(n), order, fontsize=7.3)
+    cb = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.03)
+    cb.set_label("상관계수 (위치 지문 유사도)", fontsize=9.5)
+
+    style.observation_tag(fig)
+    path = os.path.join(outdir, "S4_측정단계_군집.png")
+    return style.save(fig, path)
+
+
+def fig_v16_s4_all(df: pd.DataFrame, outdir: str) -> dict:
+    os.makedirs(outdir, exist_ok=True)
+    out = {}
+    try:
+        out["v16"] = fig_v16_position_failure_rate(df, outdir)
+    except ValueError:
+        pass
+    try:
+        out["s4"] = fig_s4_stage_cluster(df, outdir)
+    except ValueError:
+        pass
     return out
