@@ -17,6 +17,7 @@
 | [`docs/02_presentation_story.md`](docs/02_presentation_story.md) | **발표 시나리오** — 슬라이드 20장 흐름, 용어 치환표 |
 | [`docs/03_viz_guidelines.md`](docs/03_viz_guidelines.md) | **시각화 규칙** — R1~R10. `style.py` 가 코드로 강제 |
 | [`docs/04_logic_audit.md`](docs/04_logic_audit.md) | **논리 감사** — 계획의 오류 5건과 수정, 추가 분석 6건 |
+| [`docs/05_run_log.md`](docs/05_run_log.md) | **실 데이터 실행 로그** — run 결과 원본·해석·액션아이템을 실행마다 누적 기록 |
 
 ---
 
