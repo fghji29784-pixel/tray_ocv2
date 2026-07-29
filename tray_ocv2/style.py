@@ -169,6 +169,20 @@ def kind_fig(conclusion: str, how_to_read: str, figsize=(9.5, 6.6),
     return fig, axes
 
 
+def observation_tag(fig, text: str = "[관찰] 원인 미확정"):
+    """'현 상황' 그림(S1~S4)에 붙이는 태그 — 아직 인과를 주장하지 않는다는 표시.
+
+    V0~V16 의 판정영향도 배지(인과 확정 후 단계)와 다른 색으로 둬서 "이 그림은 아직
+    원인 얘기가 아니다"를 시각적으로 구분한다. 이모지는 쓰지 않는다 — 한글 폰트
+    (Malgun Gothic 등)에 색이모지 글리프가 없어 저장된 PNG 에서 빈 네모(tofu)로
+    깨진다(실측 확인).
+    """
+    fig.text(0.985, 0.975, text, fontsize=10.5, color=C["neutral"],
+             ha="right", va="top", fontweight="bold",
+             bbox=dict(boxstyle="round,pad=0.32", fc="#F2F3F5",
+                       ec=C["neutral"], alpha=0.95))
+
+
 def note(ax, text: str, xy, xytext=None, color=None):
     """R10 — 그림 안에 화살표 주석을 직접 단다."""
     color = color or C["accent"]

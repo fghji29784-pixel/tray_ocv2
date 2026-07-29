@@ -29,13 +29,67 @@ def mode_estimate(x, bin_mv: float) -> float:
     return float(vals[np.argmax(counts)])
 
 
+def freedman_diaconis_bin(x) -> float:
+    """Freedman-Diaconis 규칙으로 히스토그램 bin 폭을 자동 추정한다.
+
+    mode 계산은 bin 폭에 민감하다(양자화) — 변수마다 손으로 bin을 정하지 않고
+    분포(IQR·표본수)에서 자동으로 정하기 위함. IQR=0 이거나 표본이 너무 적으면 NaN.
+    """
+    x = pd.to_numeric(pd.Series(x), errors="coerce").dropna().to_numpy()
+    if x.size < 2:
+        return np.nan
+    q75, q25 = np.percentile(x, [75, 25])
+    iqr = q75 - q25
+    if iqr <= 0:
+        return np.nan
+    return float(2.0 * iqr / np.cbrt(x.size))
+
+
 def tray_delta(df: pd.DataFrame, value_col: str, by: str = "tray_id",
-               stat: str = "median") -> pd.Series:
-    """셀 값 − 같은 트레이 내 중심통계. 위치 편차(구배) 추출의 기본 연산."""
+               stat: str = "median", mode_bin_mv: float | None = None) -> pd.Series:
+    """셀 값 − 같은 트레이 내 중심통계. 위치 편차(구배) 추출의 기본 연산.
+
+    stat="mode" 일 때 bin 폭은 기본적으로 `freedman_diaconis_bin` 으로 전체 컬럼에서
+    한 번 추정해 모든 트레이에 동일하게 적용한다(트레이마다 다른 bin 폭을 쓰면 트레이간
+    비교가 깨진다). 자동추정이 안 되면(IQR=0 등) 0.01 로 폴백한다.
+    docv7처럼 실제 판정에 쓰이는 값은 `mode_bin_mv` 로 판정 로직의 고정 bin(예:
+    `schema.JUDGE_MODE_BIN_MV`)을 직접 넘겨 자동추정을 우회한다.
+    """
     g = df.groupby(by)[value_col]
-    center = g.transform(stat) if stat != "mode" else df.groupby(by)[value_col].transform(
-        lambda s: mode_estimate(s, bin_mv=0.01))
+    if stat != "mode":
+        return df[value_col] - g.transform(stat)
+
+    bin_mv = mode_bin_mv
+    if bin_mv is None:
+        bin_mv = freedman_diaconis_bin(df[value_col])
+        if not np.isfinite(bin_mv) or bin_mv <= 0:
+            bin_mv = 0.01
+    center = g.transform(lambda s: mode_estimate(s, bin_mv=bin_mv))
     return df[value_col] - center
+
+
+def sensitivity_median_vs_mode(df: pd.DataFrame, value_col: str, by: str = "tray_id",
+                               mode_bin_mv: float | None = None) -> pd.DataFrame:
+    """[mode 전환 위험 완화] 트레이별 median 중심값과 mode 중심값을 나란히 비교.
+
+    두 통계가 크게 갈리는 트레이가 있으면 그 트레이에서 mode 가 양자화로 불안정하다는
+    신호다(과거 랏에서 필터만 바꿔도 16셀 판정이 뒤집힌 사례 참고). 반환은 abs_diff
+    내림차순 — 위쪽 행이 가장 위험한 트레이.
+    """
+    bin_mv = mode_bin_mv
+    if bin_mv is None:
+        bin_mv = freedman_diaconis_bin(df[value_col])
+        if not np.isfinite(bin_mv) or bin_mv <= 0:
+            bin_mv = 0.01
+
+    g = df.groupby(by)[value_col]
+    tmp = df[[by]].copy()
+    tmp["median_center"] = g.transform("median")
+    tmp["mode_center"] = g.transform(lambda s: mode_estimate(s, bin_mv=bin_mv))
+    out = tmp.drop_duplicates(subset=[by]).reset_index(drop=True)
+    out["diff"] = out["mode_center"] - out["median_center"]
+    out["abs_diff"] = out["diff"].abs()
+    return out.sort_values("abs_diff", ascending=False).reset_index(drop=True)
 
 
 def to_grid(df: pd.DataFrame, value_col: str, row_col: str = "row",

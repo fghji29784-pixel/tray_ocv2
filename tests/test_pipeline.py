@@ -5,12 +5,13 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 
 import numpy as np
 import pandas as pd
 
-from tray_ocv2 import fan, fields, impact, indicators, io_load, patterns, qc, schema, spatial, timing
+from tray_ocv2 import fan, fields, figures, impact, indicators, io_load, patterns, qc, schema, spatial, timing
 from tray_ocv2.io_load import _to_datetime
 from tests.make_synthetic import make_export
 
@@ -243,6 +244,23 @@ def main():
     field = fields.position_field(df, "t_ocv2", agg="mean")
     check("position_field shape", field.shape == (12, 12))
 
+    # --- mode 전환 인프라 (원칙 0.6) ---
+    fd_bin = fields.freedman_diaconis_bin(df["docv7_raw"])
+    check("Freedman-Diaconis bin 폭 계산", np.isfinite(fd_bin) and fd_bin > 0, f"bin={fd_bin}")
+
+    dev_mode = fields.tray_delta(df, "docv7_raw", stat="mode")
+    check("tray_delta(mode, 자동bin) 실행", dev_mode.notna().mean() > 0.9)
+    dev_mode_fixed = fields.tray_delta(df, "docv7_raw", stat="mode",
+                                       mode_bin_mv=schema.JUDGE_MODE_BIN_MV)
+    check("tray_delta(mode, 고정bin) 실행", dev_mode_fixed.notna().mean() > 0.9)
+
+    sens = fields.sensitivity_median_vs_mode(df, "docv7_raw")
+    check("median vs mode 민감도 검증 shape",
+         list(sens.columns[:1]) == ["tray_id"] and len(sens) == df["tray_id"].nunique(),
+         f"len={len(sens)}")
+    check("민감도 검증 abs_diff 내림차순 정렬",
+         sens["abs_diff"].is_monotonic_decreasing, str(sens.head(3)))
+
     # --- E: 공간 지문 / 분산 분해 ---
     docv7_col = "docv7_raw"
     qspread = spatial.quantile_spread_report(df, docv7_col)
@@ -302,6 +320,15 @@ def main():
         check("I3 검출률이 주입크기에 따라 증가(비감소)",
              all(a <= b + 1e-9 for a, b in zip(rates, rates[1:])), str(rates))
         check("I3 최대 주입크기(1.5mV)에서 검출률 높음", rates[-1] > 0.8, str(rates))
+
+    # --- S1: 전체 지문 갤러리 (4장) ---
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        paths = figures.fig_s1_all(df, tmpdir)
+        check("S1 4장 전부 생성", len(paths) == 4, str(paths))
+        check("S1 파일 실제로 저장됨",
+             all(os.path.exists(p) for p in paths.values()), str(paths))
 
     print(f"\n{'='*40}")
     if FAILS:

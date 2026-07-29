@@ -12,7 +12,7 @@ import sys
 
 import pandas as pd
 
-from . import fan, impact, indicators, io_load, patterns, qc, schema, spatial, style, timing
+from . import fan, figures, impact, indicators, io_load, patterns, qc, schema, spatial, style, timing
 from .fields import position_field
 
 # Windows 콘솔 기본 인코딩(cp949)은 —, ★ 같은 유니코드 문자에서 죽는다.
@@ -369,6 +369,21 @@ def cmd_run(args):
     print(f"[저장] {out_csv}")
 
 
+def cmd_figures(args):
+    style.init()
+    fig_dir = os.path.join(args.outdir, "figures")
+    os.makedirs(fig_dir, exist_ok=True)
+
+    print(f"[로딩] {args.input}")
+    df = io_load.load(args.input)
+    print(f"[셀 수] {len(df)}  [트레이 수] {df['tray_id'].nunique() if 'tray_id' in df else '?'}")
+
+    print("\n=== [S1] 전체 지문 갤러리 (4장) ===")
+    paths = figures.fig_s1_all(df, fig_dir)
+    for name, path in paths.items():
+        print(f"[저장] {name}: {path}")
+
+
 def schema_no_heat_cols(df: pd.DataFrame):
     for key in schema.NO_HEAT_STEPS:
         for cand in (f"t_{key}", f"temp_{key}_single", f"temp_{key}_mean"):
@@ -389,6 +404,11 @@ def main(argv=None):
     p_run.add_argument("--input", required=True)
     p_run.add_argument("--outdir", default="reports")
     p_run.set_defaults(func=cmd_run)
+
+    p_figures = sub.add_parser("figures", help="발표용 시각화 산출 (S1~ 등, run과 분리)")
+    p_figures.add_argument("--input", required=True)
+    p_figures.add_argument("--outdir", default="reports/presentation")
+    p_figures.set_defaults(func=cmd_figures)
 
     args = parser.parse_args(argv)
     args.func(args)
