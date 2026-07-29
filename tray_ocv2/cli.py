@@ -126,6 +126,11 @@ def cmd_run(args):
         print(dis.to_string())
         report_lines.append("### C1 감쇠보정 상관행렬\n\n" + dis.to_markdown() + "\n")
 
+    tail = indicators.tail_consistency_check(df)
+    print("\n[C1-꼬리/오류11] ★희귀사건용 — 판정 대상 꼬리가 두 반분 모두에서 일관되게 높은가:")
+    _print_dict(tail)
+    report_lines.append(f"### C1 꼬리 일관성 (오류11)\n\n```\n{tail}\n```\n")
+
     hot_summary = {
         ind.key: {
             "고온노출_중앙값(h)": round(float(df[f"{ind.key}_hot_hours"].median()), 2)
@@ -182,6 +187,16 @@ def cmd_run(args):
         print(f"\n[F2-판결문/오류6] 도면 예측 열(FAN_COL_COLD_OUTER/MIDDLE) 직접 검정:")
         _print_dict(minima)
         report_lines.append(f"### F2 판결문 — 예측 열 검정 (오류6)\n\n```\n{minima}\n```\n")
+
+        radial = fan.fan_radial_profile(df, main_temp)
+        radial_summary = {k: v for k, v in radial.items() if k != "table"}
+        print("\n[F4/오류12] ★부호 논쟁 판별 — 팬 중심 거리별 반경 프로파일:")
+        print(radial.get("table").to_string(index=False) if "table" in radial else "(없음)")
+        _print_dict(radial_summary)
+        report_lines.append(
+            "### F4 반경 프로파일 — 부호 논쟁 판별 (오류12)\n\n"
+            + (radial["table"].to_markdown(index=False) if "table" in radial else "")
+            + f"\n\n```\n{radial_summary}\n```\n")
 
         no_heat_cols = [c for c in schema_no_heat_cols(df)
                         if fan.classify_temp_cols([c]).get("separate_instrument") is None]

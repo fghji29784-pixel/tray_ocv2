@@ -147,6 +147,14 @@ def main():
          and "S_B_hot_hours" in df.columns)
     check("오류9 아레니우스 등가율 컬럼", "S_A_rate_arrhenius" in df.columns)
 
+    tail = indicators.tail_consistency_check(df)
+    check("오류11 꼬리 일관성 검사 실행", tail.get("ok") is True, str(tail))
+    if tail.get("ok"):
+        # 합성데이터는 핫셀 누설을 두 구간에 지속되게 설계 -> 꼬리가 양쪽에서 높아야 함
+        check("오류11 꼬리가 양쪽 반분에서 높음 (합성설계 재현)",
+             tail["frac_tail_high_in_both_halves"] > tail["expected_if_random"] * 10,
+             str(tail))
+
     c2 = indicators.cross_check_grade(df)
     check("C2 준독립 대조 실행", c2.get("ok") is True, str(c2))
 
@@ -188,6 +196,16 @@ def main():
                  f"charge{n}") for n in range(1, 8)]
     reg = fan.heat_vs_amplitude_regression(df, rise_cols)
     check("오류10 발열량-진폭 회귀 실행", reg.get("ok") is True, str(reg))
+
+    radial = fan.fan_radial_profile(df, "t_ocv2")
+    check("F4 반경 프로파일 실행", radial.get("ok") is True, str(radial))
+    if radial.get("ok"):
+        # 합성데이터는 팬 중심에서 지수감쇠(단조)로 설계 -> 단조로 판정되어야 함.
+        # (사후 부호뒤집기 구제를 막는 독립검정이 실제로 단조/비단조를 가리는지 확인)
+        check("F4 단조 프로파일을 단조로 판정 (합성설계 재현)",
+             radial["is_monotonic"] is True, str(radial))
+        check("F4 중심이 가장 차가움 (합성설계 재현)",
+             radial["center_mean"] < radial["extremum_mean"], str(radial))
 
     grid = fields.to_grid(df[df["tray_id"] == df["tray_id"].iloc[0]], "t_ocv2")
     check("격자 변환 shape", grid.shape == (12, 12))

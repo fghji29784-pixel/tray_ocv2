@@ -146,6 +146,68 @@ def predicted_minima_check(profiles: dict) -> dict:
     return results
 
 
+def fan_radial_profile(df: pd.DataFrame, value_col: str, n_bins: int = 8,
+                       max_r: float = 4.0) -> dict:
+    """[F4] ★부호 논쟁을 가르는 결정적 검정 — 가장 가까운 팬 중심까지의 거리별 프로파일.
+
+    배경(docs/04_logic_audit.md 오류12): 등록했던 예측 '팬 중심 = 냉각 최강(차가움)'이
+    Run #2 에서 3밴드 전부 반대로 나왔다. 두 해석이 가능하다 —
+      (a) 팬 가설이 틀렸다
+      (b) 부호 규약이 틀렸다: 충돌제트는 팬 **허브 바로 아래가 정체점(유속 최소)** 이라
+          중심이 오히려 덜 식는다. 최대 냉각은 반경 0.5~1D 의 고리에서 일어난다.
+
+    ⚠️ 결과를 보고 부호만 뒤집는 것은 순환 논리다. (b)가 맞다면 단순 부호 반전으로는
+    설명 못 하는 **고유한 형상**이 나와야 한다: 중심에서 극값 → 중간 반경에서 반대 극값
+    → 바깥에서 감쇠(비단조, 고리 구조). 단조 프로파일이면 (b)는 지지되지 않는다.
+
+    반환의 `is_monotonic` 이 False 이고 `extremum_bin_idx` 가 중간 구간이면 고리 구조.
+    """
+    d = edge_detrend(df, value_col)          # 등방 중앙-가장자리 성분 제거 후
+    rows = pd.to_numeric(d["row"], errors="coerce").to_numpy(dtype=float)
+    cols = pd.to_numeric(d["col"], errors="coerce").to_numpy(dtype=float)
+
+    centers = [(b["row_center"], c) for b in schema.FAN_BANDS for c in b["col_centers"]]
+    dist = np.full(len(d), np.inf)
+    for rc, cc in centers:
+        dist = np.minimum(dist, np.sqrt((rows - rc) ** 2 + (cols - cc) ** 2))
+
+    d = d.assign(_r=dist)
+    valid = np.isfinite(d["_r"]) & d["_resid"].notna() & (d["_r"] <= max_r)
+    sub = d[valid]
+    if len(sub) < 200:
+        return {"ok": False, "reason": "유효 표본 부족"}
+
+    edges = np.linspace(0, max_r, n_bins + 1)
+    labels = pd.cut(sub["_r"], bins=edges, include_lowest=True)
+    g = sub.groupby(labels, observed=True)["_resid"]
+    table = pd.DataFrame({
+        "r_mid": [iv.mid for iv in g.mean().index],
+        "mean": g.mean().to_numpy(),
+        "se": (g.std() / np.sqrt(g.count())).to_numpy(),
+        "n": g.count().to_numpy(),
+    }).sort_values("r_mid", ignore_index=True)
+
+    y = table["mean"].to_numpy()
+    if len(y) < 4:
+        return {"ok": False, "reason": "구간 수 부족", "table": table}
+
+    diffs = np.diff(y)
+    is_monotonic = bool(np.all(diffs >= 0) or np.all(diffs <= 0))
+    # 중심(첫 구간) 대비 가장 크게 벗어나는 구간
+    extremum_idx = int(np.argmax(np.abs(y - y[0])))
+
+    return {
+        "ok": True, "table": table,
+        "center_mean": float(y[0]), "extremum_bin_idx": extremum_idx,
+        "extremum_r_mid": float(table["r_mid"].iloc[extremum_idx]),
+        "extremum_mean": float(y[extremum_idx]),
+        "is_monotonic": is_monotonic,
+        "note": ("비단조(is_monotonic=False)이고 극값이 중간 반경(첫·마지막 구간이 아님)"
+                "이면 충돌제트 고리 구조에 부합 → 해석(b) 지지. 단조면 (b) 미지지 — "
+                "결과 보고 부호만 뒤집는 사후 구제를 막기 위한 독립 검정"),
+    }
+
+
 def classify_temp_cols(temp_cols: list[str]) -> dict:
     """[오류7] 컬럼명(t_<key> 또는 temp_<key>_<stat>) → schema.classify_thermal_state 매핑.
 

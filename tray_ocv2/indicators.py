@@ -159,7 +159,62 @@ def split_half_reliability_S_C(df: pd.DataFrame) -> dict:
     return {
         "ok": True, "half_corr": r12, "spearman_brown_reliability": float(sb),
         "n": int(ok.sum()),
-        "note": "S_C(=docv7)의 반분신뢰도. 이완오염 있으면 과소추정(보수적) 될 수 있음",
+        "note": ("⚠️ 오류11: 이 지표는 '모두가 특성을 갖고 측정오차가 섞인다'는 고전검사"
+                "이론 가정이라, 불량률 0.065% 같은 희귀사건 데이터엔 부적합하다. 낮게 "
+                "나와도 '꼬리(진짜 불량)가 불안정하다'는 뜻이 아니다 — "
+                "tail_consistency_check() 를 함께 볼 것"),
+    }
+
+
+def tail_consistency_check(df: pd.DataFrame, top_frac: float = 0.01) -> dict:
+    """[오류11 수정] ★희귀사건용 — '판정 대상 꼬리'에서만 두 반분이 일관되는지 본다.
+
+    split_half_reliability_S_C() 는 전체 모집단 상관이라, 99.9%가 정상(=잴 특성 없음)인
+    데이터에선 낮게 나오는 게 당연하다. 실제로 Run #2 에서 half_corr=0.00626 이 나왔는데,
+    이는 96개 불량셀이 양쪽 반분에서 함께 튀는 것만으로도 (96/148858)×3² ≈ 0.006 으로
+    거의 전부 설명된다 — '신호 없음'의 증거가 아니다.
+
+    올바른 질문: **S_C 상위 꼬리로 뽑힌 셀들이 두 하위구간(P1→P2, P2→P3) 모두에서
+    높은가?** 진짜 누설이면 두 구간 다 높아야 하고, 단발 잡음이면 한쪽만 높다.
+
+    top_frac: 꼬리로 볼 상위 비율 (기본 1%).
+    """
+    if not all(c in df.columns for c in ("v_prvt1", "v_prvt2", "v_prvt3")):
+        return {"ok": False, "reason": "PRVT2 컬럼 없음"}
+    d = df.copy()
+    d["_half1"] = d["v_prvt1"] - d["v_prvt2"]
+    d["_half2"] = d["v_prvt2"] - d["v_prvt3"]
+    d["_h1"] = tray_delta(d, "_half1", stat="median")
+    d["_h2"] = tray_delta(d, "_half2", stat="median")
+    d["_full"] = d["_h1"] + d["_h2"]           # = S_C 의 트레이내 편차
+
+    ok = d["_h1"].notna() & d["_h2"].notna()
+    sub = d[ok]
+    if len(sub) < 200:
+        return {"ok": False, "reason": "표본 부족"}
+
+    n_tail = max(10, int(len(sub) * top_frac))
+    tail = sub.nlargest(n_tail, "_full")
+    rest = sub.drop(tail.index)
+
+    # 꼬리 셀이 각 반분에서 전체 대비 어느 백분위에 있는가 (0.5=무작위)
+    p1 = percentile_rank(sub["_h1"])
+    p2 = percentile_rank(sub["_h2"])
+    both_high = ((p1.loc[tail.index] > 0.9) & (p2.loc[tail.index] > 0.9)).mean()
+
+    return {
+        "ok": True, "n_tail": int(n_tail), "top_frac": top_frac,
+        "tail_median_pct_half1": float(p1.loc[tail.index].median()),
+        "tail_median_pct_half2": float(p2.loc[tail.index].median()),
+        "frac_tail_high_in_both_halves": float(both_high),
+        "expected_if_random": round(0.1 * 0.1, 4),
+        "tail_mean_half1": float(tail["_h1"].mean()),
+        "tail_mean_half2": float(tail["_h2"].mean()),
+        "rest_mean_half1": float(rest["_h1"].mean()),
+        "rest_mean_half2": float(rest["_h2"].mean()),
+        "note": ("frac_tail_high_in_both_halves 가 무작위 기대치(0.01)보다 훨씬 크고 "
+                "tail_median_pct 가 양쪽 반분 모두 0.5보다 크게 높으면 → 꼬리는 "
+                "단발 잡음이 아니라 두 구간에 걸쳐 지속되는 실제 신호"),
     }
 
 
