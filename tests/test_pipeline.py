@@ -344,6 +344,33 @@ def main():
         check("V3 파일 실제로 저장됨",
              all(os.path.exists(p) for p in v3_paths.values()), str(v3_paths))
 
+    # --- V2: L6 재현성 + null 대조 ---
+    with tempfile.TemporaryDirectory() as tmpdir:
+        v2_path = figures.fig_v2_split_half(df, "docv7_raw", tmpdir)
+        check("V2 파일 실제로 저장됨", os.path.exists(v2_path), v2_path)
+
+    # --- V14/V15: 패턴유형·고정보정한계 ---
+    with tempfile.TemporaryDirectory() as tmpdir:
+        v1415_paths = figures.fig_v14_v15_all(df, tmpdir)
+        check("V14/V15 2장 전부 생성", len(v1415_paths) == 2, str(v1415_paths))
+        check("V14/V15 파일 실제로 저장됨",
+             all(os.path.exists(p) for p in v1415_paths.values()), str(v1415_paths))
+
+    # --- V4/S3: 온도 물리적 배경 ---
+    with tempfile.TemporaryDirectory() as tmpdir:
+        v4_paths = figures.fig_v4_all(df, tmpdir)
+        check("V4/S3 그림 생성(v4a/v4b/s3)",
+             all(k in v4_paths for k in ("v4a", "v4b", "s3")), str(v4_paths))
+        check("V4/S3 파일 실제로 저장됨",
+             all(os.path.exists(p) for p in v4_paths.values()), str(v4_paths))
+
+    # --- V5/V6/V7: 영향없음/미확정 ---
+    with tempfile.TemporaryDirectory() as tmpdir:
+        v567_paths = figures.fig_v567_all(df, tmpdir)
+        check("V6/V7 최소 생성", all(k in v567_paths for k in ("v6", "v7")), str(v567_paths))
+        check("V5/V6/V7 파일 실제로 저장됨",
+             all(os.path.exists(p) for p in v567_paths.values()), str(v567_paths))
+
     print(f"\n{'='*40}")
     if FAILS:
         print(f"FAIL {len(FAILS)}건: {FAILS}")

@@ -157,8 +157,9 @@ def cmd_run(args):
 
     k3 = timing.aging_duration_bias_check(df)
     print("\n[K3] 트레이별 에이징 실제시간 편차 → 불량률 상관 (시간 축 판정 편향):")
-    _print_dict(k3)
-    report_lines.append(f"### K3 시간 편향\n\n```\n{k3}\n```\n")
+    _print_dict({k: v for k, v in k3.items() if k != "table"})
+    report_lines.append(f"### K3 시간 편향\n\n```\n"
+                        f"{ {k: v for k, v in k3.items() if k != 'table'} }\n```\n")
 
     # --- F: 팬 서명 (온도) ----------------------------------------------------
     print("\n=== [F] 팬 서명 검증 (온도 우선) ===")
@@ -393,8 +394,28 @@ def cmd_figures(args):
         paths = figures.fig_v3_all(df, fig_dir)
         for name, path in paths.items():
             print(f"[저장] {name}: {path}")
+
+        print("\n=== [V2] L6 재현성 + null 대조 그림 ===")
+        print(f"[저장] v2: {figures.fig_v2_split_half(df, 'docv7_raw', fig_dir)}")
+
+        print("\n=== [V14/V15] 패턴 유형·고정보정한계 그림 ===")
+        paths = figures.fig_v14_v15_all(df, fig_dir)
+        for name, path in paths.items():
+            print(f"[저장] {name}: {path}")
     else:
-        print("\n(docv7 컬럼이 없어 V1·V3 를 건너뜁니다)")
+        print("\n(docv7 컬럼이 없어 V1·V2·V3·V14·V15 를 건너뜁니다)")
+
+    print("\n=== [V4/S3] 온도 물리적 배경 그림 ===")
+    paths = figures.fig_v4_all(df, fig_dir)
+    for name, path in paths.items():
+        print(f"[저장] {name}: {path}")
+
+    print("\n=== [V5/V6/V7] 영향 없음/미확정 그림 ===")
+    if "docv7_raw" in df.columns:
+        df = indicators.compute(df)
+    paths = figures.fig_v567_all(df, fig_dir)
+    for name, path in paths.items():
+        print(f"[저장] {name}: {path}")
 
 
 def schema_no_heat_cols(df: pd.DataFrame):

@@ -213,6 +213,7 @@ def aging_duration_bias_check(df: pd.DataFrame, grade_col: str = "grade") -> dic
     return {
         "ok": True, "n_trays": int(len(merged)), "corr_hours_vs_failrate": r,
         "hours_range": [float(merged["hours"].min()), float(merged["hours"].max())],
+        "table": merged.reset_index(),
         "note": ("상관이 뚜렷하면(|r| 눈에 띄게 큼) 에이징 시간 편차가 판정에 영향을 "
                 "준다는 뜻 — 지금까지 자리(공간) 축만 보던 판정 편향에 시간 축이 추가됨"),
     }
