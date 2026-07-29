@@ -50,8 +50,7 @@ def make_export(n_trays: int = N_TRAYS, seed: int = 0) -> pd.DataFrame:
 
             r = {
                 schema.ID_COLS["route"]: "RT01",
-                schema.ID_COLS["product"]: "PRODX",
-                schema.ID_COLS["lot"]: "N99S",
+                schema.ID_COLS["product_lot"]: "PRODX N99S",
                 schema.ID_COLS["tray_id"]: tray_id,
                 schema.ID_COLS["cell_id"]: f"C{ti:04d}{n:04d}",
                 schema.ID_COLS["can_id"]: f"CAN{ti % 5}",

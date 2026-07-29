@@ -18,8 +18,7 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 ID_COLS = {
     "route": "공정경로",
-    "product": "Product",
-    "lot": "Lot",
+    "product_lot": "Product Lot",  # 실제 파일엔 Product/Lot 이 분리 안 되고 한 컬럼(확인됨)
     "tray_id": "Tray ID",
     "cell_id": "Cell ID",       # 식별용. 제조 순번과 무관 → 순서 분석에 쓰지 않는다.
     "can_id": "Can ID",
@@ -175,14 +174,23 @@ class Stage:
     temp_col: str | None    # 측정 시점 온도 컬럼
     start_col: str | None   # 측정 시작 시각
     in_charger: bool    # True=충방전기 내부(팬 가동) / False=별도 OCV 계측기
-    end_col: str | None = None   # 측정 종료 시각 (OCV만 확보됨)
-    dur_col: str | None = None   # 측정 작업시간
+    end_col: str | None = None   # 측정 종료 시각 (현재 미사용 — _ocv() 참조)
+    dur_col: str | None = None   # 측정 작업시간 (현재 미사용 — _ocv() 참조)
 
 
 def _ocv(n: int, order: int, soc: float) -> Stage:
+    """OCV 측정 자체는 ~1초라 종료시간·작업시간을 요청/사용하지 않는다.
+
+    이유: ① K9(CV종료 스텝 소요시간=저항프록시)는 정전압 종료 메커니즘 전제라 그냥
+    전압을 읽는 OCV엔 성립 안 함. ② K6(스캔순서 드리프트)도 1초 안에 144셀을 다
+    찍는다면 물리적으로 드리프트가 생길 여지가 없음. 현재 코드에서 end_col/dur_col의
+    유일한 소비처였던 timing.clock_sanity() 도 진단용일 뿐 핵심 분석이 아니었다.
+    OCV#01~03 은 실 파일에 종료/작업시간이 이미 존재해 그걸로 '정말 짧은지' 확인 가능
+    (요청 불필요, 있는 데이터로 검증).
+    """
     p = f"OCV #{n:02d}"
     return Stage(f"ocv{n}", p, order, soc, f"{p} OCV", f"{p}_온도",
-                 f"{p} 시작시간", True, f"{p} 종료시간", f"{p} 작업시간")
+                 f"{p} 시작시간", True)
 
 
 def _prvt(n: int, order: int) -> Stage:
