@@ -330,6 +330,20 @@ def main():
         check("S1 파일 실제로 저장됨",
              all(os.path.exists(p) for p in paths.values()), str(paths))
 
+    # --- V1: E8 분산분해 그림 ---
+    with tempfile.TemporaryDirectory() as tmpdir:
+        v1_paths = figures.fig_v1_all(df, tmpdir)
+        check("V1 2장 전부 생성", len(v1_paths) == 2, str(v1_paths))
+        check("V1 파일 실제로 저장됨",
+             all(os.path.exists(p) for p in v1_paths.values()), str(v1_paths))
+
+    # --- V3: I3 spike-in 그림 ---
+    with tempfile.TemporaryDirectory() as tmpdir:
+        v3_paths = figures.fig_v3_all(df, tmpdir)
+        check("V3 3장 전부 생성", len(v3_paths) == 3, str(v3_paths))
+        check("V3 파일 실제로 저장됨",
+             all(os.path.exists(p) for p in v3_paths.values()), str(v3_paths))
+
     print(f"\n{'='*40}")
     if FAILS:
         print(f"FAIL {len(FAILS)}건: {FAILS}")

@@ -383,6 +383,19 @@ def cmd_figures(args):
     for name, path in paths.items():
         print(f"[저장] {name}: {path}")
 
+    if "docv7_raw" in df.columns:
+        print("\n=== [V1] E8 분산분해 그림 ===")
+        paths = figures.fig_v1_all(df, fig_dir)
+        for name, path in paths.items():
+            print(f"[저장] {name}: {path}")
+
+        print("\n=== [V3] I3 spike-in 그림 ===")
+        paths = figures.fig_v3_all(df, fig_dir)
+        for name, path in paths.items():
+            print(f"[저장] {name}: {path}")
+    else:
+        print("\n(docv7 컬럼이 없어 V1·V3 를 건너뜁니다)")
+
 
 def schema_no_heat_cols(df: pd.DataFrame):
     for key in schema.NO_HEAT_STEPS:

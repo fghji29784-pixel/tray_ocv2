@@ -183,6 +183,76 @@ def observation_tag(fig, text: str = "[관찰] 원인 미확정"):
                        ec=C["neutral"], alpha=0.95))
 
 
+#: 원칙 5(docs/06_visualization_plan.md) — 판정 영향도 배지. 이모지 대신 텍스트+색
+#: (observation_tag 와 같은 이유 — 색이모지가 Malgun Gothic 등에서 tofu 로 깨짐).
+VERDICT_LEVELS = {
+    "high": ("[영향 큼]", C["high"]),
+    "high_soft": ("[영향 있음]", C["high_soft"]),
+    "neutral": ("[영향 없음]", C["neutral"]),
+    "accent": ("[판정 불가]", C["accent"]),
+}
+
+
+def verdict_badge(fig, level: str):
+    """우상단 고정 위치에 판정 영향도 배지를 단다. level: high/high_soft/neutral/accent."""
+    if level not in VERDICT_LEVELS:
+        raise ValueError(f"level 은 {list(VERDICT_LEVELS)} 중 하나여야 합니다: {level!r}")
+    text, color = VERDICT_LEVELS[level]
+    fig.text(0.985, 0.975, text, fontsize=11, color="white", fontweight="bold",
+             ha="right", va="top",
+             bbox=dict(boxstyle="round,pad=0.32", fc=color, ec=color, alpha=0.95))
+
+
+#: 인과 사슬 3단계 (docs/06_visualization_plan.md 원칙 4)
+CHAIN_STAGES = [("cause", "원인"), ("value", "값이 달라짐"), ("verdict", "판정이 흔들림")]
+
+
+def chain_strip(fig, active: str, y: float = 0.028):
+    """하단에 [원인 → 값이 달라짐 → 판정이 흔들림] 사슬을 그리고 현재 위치를 강조한다.
+
+    active 는 CHAIN_STAGES 의 키(cause/value/verdict) 중 하나, 또는 그 튜플처럼
+    ("cause", "value") 식으로 여러 단계를 동시에 강조할 수도 있다(예: F3 는 원인에는
+    ● 지만 판정까지의 직접연결은 미확정이라 verdict 는 강조하지 않음).
+
+    본문 축의 x축 라벨과 겹치지 않도록 그림 하단 여백을 강제로 확보한다(실측 확인 —
+    막대그래프의 x축 제목이 그냥 두면 이 스트립과 정확히 같은 높이에 겹쳐 그려졌다).
+    """
+    fig.subplots_adjust(bottom=max(fig.subplotpars.bottom, 0.20))
+    active_set = {active} if isinstance(active, str) else set(active)
+    n = len(CHAIN_STAGES)
+    xs = np.linspace(0.14, 0.86, n)
+    marker_y = y + 0.045
+    for i, (key, label) in enumerate(CHAIN_STAGES):
+        on = key in active_set
+        marker = "●" if on else "○"   # ● / ○
+        color = C["accent"] if on else C["neutral"]
+        fig.text(xs[i], marker_y, marker, fontsize=13, color=color,
+                 ha="center", va="center", fontweight="bold")
+        fig.text(xs[i], y, label, fontsize=9.5, color=color,
+                 ha="center", va="center", fontweight=("bold" if on else "normal"))
+        if i < n - 1:
+            fig.text((xs[i] + xs[i + 1]) / 2, marker_y, "→", fontsize=11,
+                     color=C["neutral"], ha="center", va="center")
+
+
+def binomial_ci(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score 구간 (scipy 없이). 반환: (하한, 상한), 0~1 비율."""
+    if n <= 0:
+        return (np.nan, np.nan)
+    phat = k / n
+    denom = 1 + z ** 2 / n
+    center = (phat + z ** 2 / (2 * n)) / denom
+    half = z * np.sqrt(phat * (1 - phat) / n + z ** 2 / (4 * n ** 2)) / denom
+    return (max(0.0, center - half), min(1.0, center + half))
+
+
+def annotate_count(ax, x, y, n: int, small_n_threshold: int = 30):
+    """막대 위/아래에 표본수(n=)를 표기. 표본이 작으면 경고색으로 강조."""
+    color = C["high"] if n < small_n_threshold else "#6B7078"
+    ax.annotate(f"n={n}", xy=(x, y), xytext=(0, 3), textcoords="offset points",
+               fontsize=8.5, color=color, ha="center", va="bottom")
+
+
 def note(ax, text: str, xy, xytext=None, color=None):
     """R10 — 그림 안에 화살표 주석을 직접 단다."""
     color = color or C["accent"]
