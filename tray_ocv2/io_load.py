@@ -48,8 +48,53 @@ def _to_numeric(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
 
 
+#: '2026-07-08 오전 5:39:34' 형식 — pandas 기본 파서가 인식 못 하는 한글 오전/오후.
+#: (에이징 시각 컬럼은 엑셀 datetime 셀로 저장돼 있어 이 문제가 없다. OCV/LCI/Charge/
+#:  DisCharge 시각은 문자열로 저장돼 있어 이 파서가 필요하다 — 2026-07 실사례로 확인)
+_KOREAN_AMPM_RE = r"^(\d{4}-\d{2}-\d{2})\s*(오전|오후)\s*(\d{1,2}):(\d{2}):(\d{2})$"
+
+
+def _parse_korean_ampm(s: pd.Series) -> pd.Series:
+    ext = s.astype(str).str.strip().str.extract(_KOREAN_AMPM_RE)
+    ext.columns = ["date", "ampm", "h", "m", "sec"]
+    ok = ext["date"].notna()
+    if not ok.any():
+        return pd.Series(pd.NaT, index=s.index)
+
+    h = pd.to_numeric(ext["h"], errors="coerce")
+    is_pm = ext["ampm"] == "오후"
+    h24 = h.where(~((~is_pm) & (h == 12)), 0)      # 오전 12시(자정) → 0시
+    h24 = h24.where(~(is_pm & (h != 12)), h + 12)   # 오후 1~11시 → +12시 (오후 12시는 그대로)
+
+    combined = (ext["date"] + " " + h24.astype("Int64").astype(str).str.zfill(2)
+               + ":" + ext["m"] + ":" + ext["sec"])
+    return pd.to_datetime(combined.where(ok), format="%Y-%m-%d %H:%M:%S", errors="coerce")
+
+
 def _to_datetime(s: pd.Series) -> pd.Series:
-    return pd.to_datetime(s, errors="coerce")
+    """날짜 파싱. 한글 오전/오후 형식이면 그쪽을 먼저 시도한다.
+
+    컬럼 전체가 한글 형식이면(엑셀 문자열 저장, 실사례) pandas 표준 파서는 전부
+    실패한 뒤에야 행별 dateutil 폴백으로 넘어가 149k행 기준 수 초~수십 초가 걸린다.
+    먼저 감지해서 순서를 바꾸면 빠른 벡터화 경로만 탄다.
+    """
+    looks_korean = (s.dtype == object and s.notna().any()
+                    and s.dropna().astype(str).str.contains("오전|오후").any())
+
+    if looks_korean:
+        out = _parse_korean_ampm(s)
+        still_missing = out.isna() & s.notna()
+        if still_missing.any():
+            out = out.copy()
+            out.loc[still_missing] = pd.to_datetime(s[still_missing], errors="coerce")
+        return out
+
+    primary = pd.to_datetime(s, errors="coerce")
+    still_missing = primary.isna() & s.notna()
+    if still_missing.any():
+        primary = primary.copy()
+        primary.loc[still_missing] = _parse_korean_ampm(s[still_missing])
+    return primary
 
 
 def build_cell_table(raw: pd.DataFrame) -> pd.DataFrame:

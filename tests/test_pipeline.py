@@ -8,8 +8,10 @@ from __future__ import annotations
 import sys
 
 import numpy as np
+import pandas as pd
 
 from tray_ocv2 import fan, fields, indicators, io_load, qc, schema, timing
+from tray_ocv2.io_load import _to_datetime
 from tests.make_synthetic import make_export
 
 FAILS = []
@@ -22,7 +24,34 @@ def check(name, cond, detail=""):
         FAILS.append(name)
 
 
+def check_korean_ampm_parsing():
+    """2026-07-29 실사례: 'YYYY-MM-DD 오전/오후 H:MM:SS' 형식 파싱 회귀 방지."""
+    s = pd.Series([
+        "2026-07-08 오전 5:39:34", "2026-07-08 오전 5:37:24",
+        "2026-01-01 오전 12:00:00",   # 자정 -> 00:00:00
+        "2026-01-01 오후 12:00:00",   # 정오 -> 12:00:00
+        "2026-01-01 오후 1:05:09",    # -> 13:05:09
+        "2026-01-01 오후 11:59:59",   # -> 23:59:59
+        None, "garbage",
+    ])
+    expected = [
+        pd.Timestamp("2026-07-08 05:39:34"), pd.Timestamp("2026-07-08 05:37:24"),
+        pd.Timestamp("2026-01-01 00:00:00"), pd.Timestamp("2026-01-01 12:00:00"),
+        pd.Timestamp("2026-01-01 13:05:09"), pd.Timestamp("2026-01-01 23:59:59"),
+        pd.NaT, pd.NaT,
+    ]
+    out = _to_datetime(s)
+    ok = all((pd.isna(a) and pd.isna(b)) or a == b for a, b in zip(out, expected))
+    check("한글 오전/오후 시각 파싱", ok, str(list(out)))
+
+    already_dt = pd.Series(pd.to_datetime(["2026-07-08 05:39:34", "2026-07-08 06:00:00"]))
+    out2 = _to_datetime(already_dt)
+    check("이미 datetime64 인 컬럼 무변형 통과", (out2 == already_dt).all())
+
+
 def main():
+    check_korean_ampm_parsing()
+
     raw = make_export(n_trays=30, seed=1)
     check("합성 데이터 생성", len(raw) == 30 * 144, f"len={len(raw)}")
 
