@@ -18,6 +18,7 @@
 | [`docs/03_viz_guidelines.md`](docs/03_viz_guidelines.md) | **시각화 규칙** — R1~R10. `style.py` 가 코드로 강제 |
 | [`docs/04_logic_audit.md`](docs/04_logic_audit.md) | **논리 감사** — 계획의 오류 5건과 수정, 추가 분석 6건 |
 | [`docs/05_run_log.md`](docs/05_run_log.md) | **실 데이터 실행 로그** — run 결과 원본·해석·액션아이템을 실행마다 누적 기록 |
+| [`docs/06_visualization_plan.md`](docs/06_visualization_plan.md) | **발표 시각화 계획** — 판정 영향도를 비전문가에게 보이는 그림 V0~V16 상세 설계 |
 
 ---
 
