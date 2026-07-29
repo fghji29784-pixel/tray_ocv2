@@ -194,6 +194,30 @@ def step_wait_time(df: pd.DataFrame, therm_key: str) -> pd.Series:
     return wall - dur_h
 
 
+def aging_duration_bias_check(df: pd.DataFrame, grade_col: str = "grade") -> dict:
+    """[K3] ★신규 관점 — 트레이별 에이징 실제시간 편차가 판정에 영향을 주는가.
+
+    라인 정체로 오래 방치된 트레이는 전압이 더 떨어져 판정에 불리할 수 있다.
+    지금까지 판정 편향은 '자리(공간)' 축만 봤는데, 여기서 '기다린 시간' 축을 추가한다.
+    트레이별 S_C 구간 실제 경과시간과 트레이 불량률의 상관을 본다.
+    """
+    if not all(c in df.columns for c in ("S_C_hours", "tray_id", grade_col)):
+        return {"ok": False, "reason": "필요 컬럼 없음(indicators.compute() 선행 필요)"}
+    tray_hours = df.groupby("tray_id")["S_C_hours"].median()
+    tray_fail = df.groupby("tray_id")[grade_col].apply(
+        lambda s: float((s.astype(str) == schema.GRADE_FAIL).mean()))
+    merged = pd.DataFrame({"hours": tray_hours, "fail_rate": tray_fail}).dropna()
+    if len(merged) < 20 or merged["hours"].std() < 1e-9:
+        return {"ok": False, "reason": "표본/분산 부족"}
+    r = float(np.corrcoef(merged["hours"], merged["fail_rate"])[0, 1])
+    return {
+        "ok": True, "n_trays": int(len(merged)), "corr_hours_vs_failrate": r,
+        "hours_range": [float(merged["hours"].min()), float(merged["hours"].max())],
+        "note": ("상관이 뚜렷하면(|r| 눈에 띄게 큼) 에이징 시간 편차가 판정에 영향을 "
+                "준다는 뜻 — 지금까지 자리(공간) 축만 보던 판정 편향에 시간 축이 추가됨"),
+    }
+
+
 def clock_sanity(df: pd.DataFrame) -> pd.DataFrame:
     """[A8] 시작<종료 여부 전수 검사. 음수 구간은 시계 불일치 의심."""
     rows = []

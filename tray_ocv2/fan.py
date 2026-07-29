@@ -187,24 +187,111 @@ def fan_radial_profile(df: pd.DataFrame, value_col: str, n_bins: int = 8,
         "n": g.count().to_numpy(),
     }).sort_values("r_mid", ignore_index=True)
 
-    y = table["mean"].to_numpy()
-    if len(y) < 4:
+    info = _monotonic_info(table)
+    if not info.get("ok"):
         return {"ok": False, "reason": "구간 수 부족", "table": table}
-
-    diffs = np.diff(y)
-    is_monotonic = bool(np.all(diffs >= 0) or np.all(diffs <= 0))
-    # 중심(첫 구간) 대비 가장 크게 벗어나는 구간
-    extremum_idx = int(np.argmax(np.abs(y - y[0])))
 
     return {
         "ok": True, "table": table,
-        "center_mean": float(y[0]), "extremum_bin_idx": extremum_idx,
-        "extremum_r_mid": float(table["r_mid"].iloc[extremum_idx]),
+        "center_mean": info["center_mean"],
+        "extremum_bin_idx": int(np.argmax(np.abs(table["mean"].to_numpy()
+                                                 - info["center_mean"]))),
+        "extremum_r_mid": info["extremum_d_mid"], "extremum_mean": info["extremum_mean"],
+        "is_monotonic": info["is_monotonic"], "trend_corr": info["trend_corr"],
+        "note": ("is_monotonic 하나만 보지 말 것 — 끝단 표본이 적은 구간의 잡음만으로도 "
+                "뒤집힌다. trend_corr(거리-값 선형상관)이 크면(|r|>0.8 등) 잡음이 있어도 "
+                "전반적으로는 단조에 가깝다는 뜻. 비단조 + trend_corr 도 약하고 극값이 "
+                "중간 반경이면 충돌제트 고리 구조에 부합 → 해석(b) 지지. 결과 보고 "
+                "부호만 뒤집는 사후 구제를 막기 위한 독립 검정"),
+    }
+
+
+def _monotonic_info(t: pd.DataFrame) -> dict:
+    """반경/거리 프로파일의 단조성 판정.
+
+    ⚠️ `is_monotonic`(구간별 부호 전부 일치)은 이진 판정이라 끝단의 표본이 적은
+    구간 하나의 잡음만으로도 뒤집힌다(합성 데이터로 실제 발견 — 단조로 설계했는데
+    맨 끝 구간에서 근소하게 흔들려 False 로 나옴). 오류12에서 지적한 "사전등록
+    검정의 판별력 부족"과 같은 종류의 문제라 여기서도 보강한다: 구간중점과 평균값의
+    **선형 상관(trend_corr)** 을 같이 낸다 — 전반적 추세는 단일 잡음 구간에 흔들리지
+    않는다. 해석 시 `is_monotonic` 하나만 보지 말고 `trend_corr` 크기와 함께 볼 것
+    (|trend_corr| 가 크면(예 >0.8) 잡음이 있어도 전반적으로는 단조에 가깝다는 뜻).
+    """
+    y = t["mean"].to_numpy()
+    x = t.iloc[:, 0].to_numpy(dtype=float)
+    if len(y) < 4:
+        return {"ok": False}
+    diffs = np.diff(y)
+    is_mono = bool(np.all(diffs >= 0) or np.all(diffs <= 0))
+    trend_corr = (float(np.corrcoef(x, y)[0, 1]) if np.std(y) > 1e-12 else np.nan)
+    extremum_idx = int(np.argmax(np.abs(y - y[0])))
+    return {
+        "ok": True, "is_monotonic": is_mono, "trend_corr": trend_corr,
+        "center_mean": float(y[0]),
+        "extremum_d_mid": float(t.iloc[extremum_idx, 0]),
         "extremum_mean": float(y[extremum_idx]),
-        "is_monotonic": is_monotonic,
-        "note": ("비단조(is_monotonic=False)이고 극값이 중간 반경(첫·마지막 구간이 아님)"
-                "이면 충돌제트 고리 구조에 부합 → 해석(b) 지지. 단조면 (b) 미지지 — "
-                "결과 보고 부호만 뒤집는 사후 구제를 막기 위한 독립 검정"),
+    }
+
+
+def fan_radial_profile_anisotropic(df: pd.DataFrame, value_col: str,
+                                   n_bins: int = 6) -> dict:
+    """[F4 이방성 분리] ★행/열 방향을 따로 — 밴드경계 효과와 팬간격 효과를 가른다.
+
+    등방 반경(fan_radial_profile, F4)은 여러 밴드에 걸친 대각선 거리를 하나로 뭉쳐서,
+    '밴드 경계를 넘어가며 생기는 효과'와 '한 밴드 안에서 팬 사이 간격 때문에 생기는
+    효과'를 구분하지 못한다(Run #3에서 r=1.75/2.25 의 비단조 패턴이 어느 쪽인지
+    불명확했던 이유).
+
+    각 셀을 먼저 자신이 속한 밴드로 배정한 뒤, **같은 밴드 안에서만**
+      ① 세로 거리 = |row − 그 밴드의 row_center|  (밴드 폭 내부로 자동 한정)
+      ② 가로 거리 = |col − 그 밴드 내 가장 가까운 col_center|  (같은 밴드 내부로 한정,
+         옆 밴드로 안 넘어감)
+    를 따로 프로파일링한다. 세로축은 '허브 정체점' 가설을, 가로축은 '팬 사이 간격'
+    가설을 밴드경계 오염 없이 각각 순수하게 검정한다.
+    """
+    d = edge_detrend(df, value_col)
+    rows = pd.to_numeric(d["row"], errors="coerce").to_numpy(dtype=float)
+    cols = pd.to_numeric(d["col"], errors="coerce").to_numpy(dtype=float)
+
+    d_row = np.full(len(d), np.nan)
+    d_col = np.full(len(d), np.nan)
+    for band in schema.FAN_BANDS:
+        r0, r1 = band["rows"]
+        mask = (rows >= r0) & (rows <= r1)
+        if not mask.any():
+            continue
+        d_row[mask] = np.abs(rows[mask] - band["row_center"])
+        centers = np.asarray(band["col_centers"])
+        d_col[mask] = np.min(np.abs(cols[mask][:, None] - centers[None, :]), axis=1)
+
+    d = d.assign(_d_row=d_row, _d_col=d_col)
+    valid = np.isfinite(d["_d_row"]) & np.isfinite(d["_d_col"]) & d["_resid"].notna()
+    sub = d[valid]
+    if len(sub) < 200:
+        return {"ok": False, "reason": "유효 표본 부족"}
+
+    def _profile(distcol, maxd):
+        edges = np.linspace(0, maxd, n_bins + 1)
+        labels = pd.cut(sub[distcol], bins=edges, include_lowest=True)
+        g = sub.groupby(labels, observed=True)["_resid"]
+        return pd.DataFrame({
+            "d_mid": [iv.mid for iv in g.mean().index],
+            "mean": g.mean().to_numpy(),
+            "se": (g.std() / np.sqrt(g.count())).to_numpy(),
+            "n": g.count().to_numpy(),
+        }).sort_values("d_mid", ignore_index=True)
+
+    row_prof = _profile("_d_row", float(np.nanmax(sub["_d_row"])) or 2.0)
+    col_prof = _profile("_d_col", float(np.nanmax(sub["_d_col"])) or 2.0)
+
+    return {
+        "ok": True,
+        "row_axis_profile": row_prof, "col_axis_profile": col_prof,
+        "row_axis_summary": _monotonic_info(row_prof),
+        "col_axis_summary": _monotonic_info(col_prof),
+        "note": ("row_axis = 밴드 폭 내부 세로거리(허브 정체점 가설 순수 검정). "
+                "col_axis = 같은 밴드 내부 가로거리(팬간격 가설 순수 검정, 밴드경계 "
+                "안 넘어감). 등방 F4의 비단조성이 어느 축에서 오는지 여기서 가른다"),
     }
 
 

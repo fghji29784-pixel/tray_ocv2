@@ -12,7 +12,7 @@ import sys
 
 import pandas as pd
 
-from . import fan, indicators, io_load, qc, schema, style, timing
+from . import fan, impact, indicators, io_load, patterns, qc, schema, spatial, style, timing
 from .fields import position_field
 
 # Windows 콘솔 기본 인코딩(cp949)은 —, ★ 같은 유니코드 문자에서 죽는다.
@@ -131,6 +131,11 @@ def cmd_run(args):
     _print_dict(tail)
     report_lines.append(f"### C1 꼬리 일관성 (오류11)\n\n```\n{tail}\n```\n")
 
+    tail_rate = indicators.tail_rate_check(df)
+    print("\n[C1-꼬리율] ★가속 열화인가 구간길이 차이인가 — 율(mV/day)로 재확인:")
+    _print_dict(tail_rate)
+    report_lines.append(f"### C1 꼬리 가속열화 판별\n\n```\n{tail_rate}\n```\n")
+
     hot_summary = {
         ind.key: {
             "고온노출_중앙값(h)": round(float(df[f"{ind.key}_hot_hours"].median()), 2)
@@ -149,6 +154,11 @@ def cmd_run(args):
     print("\n[C2] 등급 E 셀의 S_A/S_B 준독립 대조:")
     _print_dict(c2)
     report_lines.append(f"### C2 준독립 대조\n\n```\n{c2}\n```\n")
+
+    k3 = timing.aging_duration_bias_check(df)
+    print("\n[K3] 트레이별 에이징 실제시간 편차 → 불량률 상관 (시간 축 판정 편향):")
+    _print_dict(k3)
+    report_lines.append(f"### K3 시간 편향\n\n```\n{k3}\n```\n")
 
     # --- F: 팬 서명 (온도) ----------------------------------------------------
     print("\n=== [F] 팬 서명 검증 (온도 우선) ===")
@@ -198,6 +208,25 @@ def cmd_run(args):
             + (radial["table"].to_markdown(index=False) if "table" in radial else "")
             + f"\n\n```\n{radial_summary}\n```\n")
 
+        aniso = fan.fan_radial_profile_anisotropic(df, main_temp)
+        print("\n[F4-이방성] ★행/열 방향 분리 — 밴드경계 효과 vs 팬간격 효과 판별:")
+        if aniso.get("ok"):
+            print("  [세로축(허브 정체점 가설)]")
+            print(aniso["row_axis_profile"].to_string(index=False))
+            print("  ", aniso["row_axis_summary"])
+            print("  [가로축(팬간격 가설, 밴드 내부만)]")
+            print(aniso["col_axis_profile"].to_string(index=False))
+            print("  ", aniso["col_axis_summary"])
+        else:
+            print(" ", aniso)
+        report_lines.append(
+            "### F4 이방성 분리 (행/열)\n\n"
+            + (("**세로축**\n\n" + aniso["row_axis_profile"].to_markdown(index=False)
+               + f"\n\n```\n{aniso['row_axis_summary']}\n```\n\n"
+               + "**가로축**\n\n" + aniso["col_axis_profile"].to_markdown(index=False)
+               + f"\n\n```\n{aniso['col_axis_summary']}\n```\n")
+              if aniso.get("ok") else f"```\n{aniso}\n```\n"))
+
         no_heat_cols = [c for c in schema_no_heat_cols(df)
                         if fan.classify_temp_cols([c]).get("separate_instrument") is None]
         f3 = fan.amplitude_vs_heat(
@@ -240,6 +269,96 @@ def cmd_run(args):
         print(f"\n[저장] {fig_dir}/F_온도지문.png")
     else:
         print("(온도 컬럼이 없어 F 그룹을 건너뜁니다)")
+
+    # --- E: 공간 지문 (발표 파트 I 핵심) ---------------------------------------
+    print("\n=== [E] 공간 지문 · 분산 분해 ===")
+    docv7_col = "docv7_raw"
+    if docv7_col in df.columns:
+        from .fields import tray_delta as _tray_delta
+        _dev_tmp = df.copy()
+        _dev_tmp["_dev"] = _tray_delta(_dev_tmp, docv7_col, stat="median")
+        mean_field = position_field(_dev_tmp, "_dev", agg="mean")
+        rms_field = position_field(_dev_tmp, "_dev", agg="rms")
+        print("[E1] docv7 위치별 평균 필드 (일부):")
+        print(mean_field.iloc[:4].to_string())
+        print("[E1] docv7 위치별 RMS 필드 (부호무관 진폭, 일부):")
+        print(rms_field.iloc[:4].to_string())
+        report_lines.append(
+            "## E. 공간 지문\n\n### E1 평균/RMS 필드\n\n**평균**\n\n"
+            + mean_field.to_markdown() + "\n\n**RMS**\n\n" + rms_field.to_markdown() + "\n")
+
+        qspread = spatial.quantile_spread_report(df, docv7_col)
+        print("\n[E2] 위치별 분위수 확산 — 평행이동인가 꼬리 집중인가:")
+        _print_dict(qspread)
+        report_lines.append(f"### E2 분위수 확산\n\n```\n{qspread}\n```\n")
+
+        vardecomp = spatial.variance_decomposition(df, docv7_col)
+        print("\n[E8, 오류5 수정] ★분산 분해 — 고정보정 한계의 정식 수치:")
+        _print_dict(vardecomp)
+        report_lines.append(f"### E8 분산 분해 (오류5 수정)\n\n```\n{vardecomp}\n```\n")
+
+        fig, ax = style.kind_fig(
+            "전압 강하량(docv7)이 자리마다 다릅니다",
+            "칸 하나가 셀 하나. 색은 같은 트레이 안 중앙값과의 차이(mV)입니다.",
+            figsize=(9.2, 7.8), top=0.86)
+        style.tray_heatmap(ax, mean_field.to_numpy(), unit="mV", show_fans=False)
+        style.save(fig, os.path.join(fig_dir, "E1_docv7_지문.png"))
+        print(f"\n[저장] {fig_dir}/E1_docv7_지문.png")
+
+        # --- L: 패턴 유형·비율 (원인 불문 성립하는 문제점) ---------------------
+        print("\n=== [L] 패턴 유형 · 비율 ===")
+        pattern_df = patterns.classify_patterns(df, docv7_col)
+        ratio = patterns.pattern_ratio(pattern_df)
+        print("[L1·L2] 트레이별 패턴 유형 분류 + 비율:")
+        _print_dict(ratio)
+        report_lines.append(f"## L. 패턴 유형·비율\n\n### L1·L2 유형 비율\n\n```\n{ratio}\n```\n")
+
+        gsize = patterns.pattern_gradient_size(df, docv7_col, pattern_df)
+        print("\n[L3] 유형별 구배 크기(p2p, 판정기준 대비 %):")
+        _print_dict(gsize)
+        report_lines.append(f"### L3 유형별 구배 크기\n\n```\n{gsize}\n```\n")
+
+        pfail = patterns.pattern_failure_rate(df, pattern_df)
+        print("\n[L4] 유형별 불량 판정률:")
+        _print_dict(pfail)
+        report_lines.append(f"### L4 유형별 불량률\n\n```\n{pfail}\n```\n")
+
+        flimit = patterns.fixed_correction_limit(vardecomp)
+        print("\n[L5, 오류5 수정] 고정 보정의 한계 (정식 분산분해 기반):")
+        _print_dict(flimit)
+        report_lines.append(f"### L5 고정보정 한계\n\n```\n{flimit}\n```\n")
+
+        splithalf = patterns.split_half_reproducibility(df, docv7_col)
+        print("\n[L6] 랏 1개 재현성 — 무작위 절반 분할 비교:")
+        _print_dict(splithalf)
+        report_lines.append(f"### L6 split-half 재현성\n\n```\n{splithalf}\n```\n")
+
+        # --- I: 판정 영향 (발표 클라이맥스) ------------------------------------
+        print("\n=== [I] 판정 영향 정량화 ===")
+        pfr = impact.position_failure_rate(df)
+        print("[I2] ★위치별 불량 판정률 배수:")
+        _print_dict({k: v for k, v in pfr.items() if k not in ("field", "ratio_field")})
+        report_lines.append(
+            "## I. 판정 영향\n\n### I2 위치별 불량 판정률\n\n```\n"
+            + str({k: v for k, v in pfr.items() if k not in ("field", "ratio_field")})
+            + "\n```\n")
+        if pfr.get("ok"):
+            fig, ax = style.kind_fig(
+                f"어떤 자리는 평균보다 최대 {pfr['max_ratio']:.1f}배 더 자주 불량 판정됩니다",
+                "칸 하나가 셀 위치 하나. 색은 트레이 평균 불량률 대비 배수입니다.",
+                figsize=(9.2, 7.8), top=0.86)
+            style.tray_heatmap(ax, pfr["ratio_field"].to_numpy(), unit="배",
+                              show_fans=False, show_margin_axis=False,
+                              cbar_label="평균 대비 불량 판정 배수")
+            style.save(fig, os.path.join(fig_dir, "I2_위치별불량률.png"))
+            print(f"\n[저장] {fig_dir}/I2_위치별불량률.png")
+
+        spike = impact.spike_in_test(df)
+        print("\n[I3] ★★유일한 비순환 성능지표 — 인공 결함 위치별 검출률:")
+        _print_dict(spike)
+        report_lines.append(f"### I3 spike-in 검출률\n\n```\n{spike}\n```\n")
+    else:
+        print("(docv7 컬럼이 없어 E/L/I 그룹을 건너뜁니다)")
 
     with open(os.path.join(args.outdir, "report_auto.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(report_lines))

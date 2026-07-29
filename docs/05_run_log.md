@@ -291,3 +291,40 @@ c5 c6 c7 ocv6 d1..d7 ocv7 rt4 prvt1 rt5 prvt2 rt6 prvt3
    고리 구조(해석 b 지지). 단조면 해석 (b) 미지지 → 팬 가설 기각 쪽.
 3. 문서 정합성: C 그룹·발표 시나리오에서 "자기방전 3회" 전제 제거
 4. A7 `bin_mv` 민감도 스윕 (여전히 미구현)
+
+---
+
+## Run #3 — 2026-07-30 (사용자 실행 결과 반영)
+
+`tail_consistency_check`·`fan_radial_profile`(F4) 실행 결과 확인. 상세 해석은 대화
+로그 참조, 핵심만 기록:
+
+- **`frac_tail_high_in_both_halves = 0.894`** (무작위 기대치 0.01의 89배) — ★★
+  **docv7 꼬리는 진짜 신호. 현행 판정은 실체를 본다.** 이번 프로젝트 최대 소득.
+- 단, `tail_mean_half1=0.20mV` vs `tail_mean_half2=14.5mV` (72배, 정규화 전) —
+  가속열화 가능성 제기 → `tail_rate_check()` 후속 구현(아래)
+- `fan_radial_profile`(F4): 중심(-0.088)이 가장 차갑고 r=1.75 에서 극값(+0.040),
+  r=2.25 에서 다시 차가움(-0.059) — `is_monotonic=False` 로 사전등록 기준은
+  기술적으로 충족했으나, 등록해둔 두 가설(단조 감쇠 / 허브따뜻+고리차가움) 어느 쪽과도
+  깔끔히 안 맞음. **팬 사이 간격(피치 절반≈1.6~1.9)과 밴드경계가 뒤섞였을 가능성**
+  제기 → 이방성 분리 후속 구현(아래)
+
+### 후속 조치 (2026-07-30, 코드 구현 완료 — `docs/04_logic_audit.md` 3차 감사)
+
+| 요청 | 구현 |
+|---|---|
+| 꼬리 율(mV/day) 재계산 | `indicators.tail_rate_check()` — RT5/RT6 실제시간으로 정규화 |
+| F4 이방성 분리 | `fan.fan_radial_profile_anisotropic()` — 밴드 내부 세로/가로 분리 |
+| 2단계 발표 핵심 파트 | `spatial.py`(E2·E7·E8) · `patterns.py`(L1~L6) · `impact.py`(I2·I3) · `timing.aging_duration_bias_check`(K3) 전부 구현 |
+
+부수 발견(오류13): `is_monotonic` 이진판정이 끝단 잡음 하나에 뒤집힘 → `trend_corr`
+추가로 보강(상세 `docs/04_logic_audit.md` 3차 감사).
+
+**팬은 위→아래 송풍**(하향, 사용자 확인) — 허브 정체점 가설의 물리적 타당성 뒷받침.
+
+**Run #4 볼 때 우선순위**: ① `tail_rate_check` — rate_ratio 가 1 근처면 원래 72배는
+구간길이 차이, 여전히 크면 진짜 가속열화. ② `F4-이방성` row/col 축 각각의
+`trend_corr` — 어느 축이 비단조의 원인인지. ③ **E8 분산분해** — 고정보정으로 잡을
+수 있는 실제 비율(오류5의 "10%" 정식 대체). ④ **I2/I3** — 위치별 불량률 배수·
+spike-in 위치별 검출률(발표 클라이맥스, 유일한 비순환 성능지표). ⑤ L1~L6 패턴
+유형·비율.

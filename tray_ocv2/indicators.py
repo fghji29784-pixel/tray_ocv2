@@ -18,8 +18,8 @@ import pandas as pd
 
 from . import schema
 from .fields import pairwise_corr, percentile_rank, tray_delta
-from .timing import (arrhenius_normalize, indicator_high_temp_hours, indicator_hours,
-                     rate_mv_per_day, rest_before_ocv)
+from .timing import (aging_hours, arrhenius_normalize, indicator_high_temp_hours,
+                     indicator_hours, rate_mv_per_day, rest_before_ocv)
 
 
 def compute(df: pd.DataFrame) -> pd.DataFrame:
@@ -215,6 +215,56 @@ def tail_consistency_check(df: pd.DataFrame, top_frac: float = 0.01) -> dict:
         "note": ("frac_tail_high_in_both_halves 가 무작위 기대치(0.01)보다 훨씬 크고 "
                 "tail_median_pct 가 양쪽 반분 모두 0.5보다 크게 높으면 → 꼬리는 "
                 "단발 잡음이 아니라 두 구간에 걸쳐 지속되는 실제 신호"),
+    }
+
+
+def tail_rate_check(df: pd.DataFrame, top_frac: float = 0.01) -> dict:
+    """[Run #3 후속] ★가속 열화 여부 판별 — 꼬리 half1/half2 raw mV 차이(72배, Run #2)가
+
+    진짜 가속인지 구간 길이 차이(RT5≈48h vs RT6≈24h)일 뿐인지, 꼬리 셀 각자의 실제
+    RT5·RT6 시간으로 mV/day 율을 내서 재확인한다. tail_consistency_check() 는 raw mV
+    로 '두 구간 다 튀는가'만 봤고, 크기 비교(72배)는 정규화 전이라 해석 보류였다.
+
+    율로 정규화한 후에도 rate_ratio 가 여전히 크면(예 3~5배 이상) 구간길이로 설명
+    안 되는 진짜 가속 열화 가능성 — 미세단락·덴드라이트 진행성 악화 패턴과 부합.
+    비율이 1 근처로 좁혀지면 raw mV 차이는 구간길이 차이가 대부분 설명한 것.
+    """
+    if not all(c in df.columns for c in ("v_prvt1", "v_prvt2", "v_prvt3", "tray_id")):
+        return {"ok": False, "reason": "PRVT2 또는 tray_id 없음"}
+    d = df.copy()
+    d["_half1"] = d["v_prvt1"] - d["v_prvt2"]
+    d["_half2"] = d["v_prvt2"] - d["v_prvt3"]
+    d["_h1"] = tray_delta(d, "_half1", stat="median")
+    d["_h2"] = tray_delta(d, "_half2", stat="median")
+    d["_full"] = d["_h1"] + d["_h2"]
+    d["_hours1"] = aging_hours(d, "rt5")   # prvt1→prvt2 구간
+    d["_hours2"] = aging_hours(d, "rt6")   # prvt2→prvt3 구간
+
+    ok = (d["_h1"].notna() & d["_h2"].notna()
+         & (d["_hours1"] > 0) & (d["_hours2"] > 0))
+    sub = d[ok]
+    if len(sub) < 200:
+        return {"ok": False, "reason": "표본 부족(휴지시간 결측 포함)"}
+
+    n_tail = max(10, int(len(sub) * top_frac))
+    tail = sub.nlargest(n_tail, "_full")
+
+    rate1 = tail["_h1"] / (tail["_hours1"] / 24.0)
+    rate2 = tail["_h2"] / (tail["_hours2"] / 24.0)
+    med_r1, med_r2 = float(rate1.median()), float(rate2.median())
+
+    return {
+        "ok": True, "n_tail": int(n_tail),
+        "median_hours1_rt5": float(tail["_hours1"].median()),
+        "median_hours2_rt6": float(tail["_hours2"].median()),
+        "raw_mv_half1": float(tail["_h1"].mean()), "raw_mv_half2": float(tail["_h2"].mean()),
+        "raw_mv_ratio_2_over_1": (float(tail["_h2"].mean() / tail["_h1"].mean())
+                                  if tail["_h1"].mean() != 0 else np.nan),
+        "rate_mv_per_day_half1": med_r1, "rate_mv_per_day_half2": med_r2,
+        "rate_ratio_2_over_1": (med_r2 / med_r1) if med_r1 not in (0, np.nan) else np.nan,
+        "note": ("rate_ratio 가 raw_mv_ratio 보다 훨씬 1에 가까워지면 원래 72배 차이는 "
+                "대부분 구간길이(RT5≈48h vs RT6≈24h) 차이였던 것. rate_ratio 도 여전히 "
+                "크면(3~5배 이상) 진짜 가속 열화 — 미세단락 진행성 악화 가능성"),
     }
 
 

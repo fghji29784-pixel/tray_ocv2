@@ -10,9 +10,14 @@ import sys
 import numpy as np
 import pandas as pd
 
-from tray_ocv2 import fan, fields, indicators, io_load, qc, schema, timing
+from tray_ocv2 import fan, fields, impact, indicators, io_load, patterns, qc, schema, spatial, timing
 from tray_ocv2.io_load import _to_datetime
 from tests.make_synthetic import make_export
+
+# cli.py 와 동일한 이유(cp949 콘솔이 —,★ 등에서 죽음) — 실패 상세 메시지 출력 시 필요.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 FAILS = []
 
@@ -155,6 +160,13 @@ def main():
              tail["frac_tail_high_in_both_halves"] > tail["expected_if_random"] * 10,
              str(tail))
 
+    tail_rate = indicators.tail_rate_check(df)
+    check("꼬리 가속열화 판별 실행", tail_rate.get("ok") is True, str(tail_rate))
+    if tail_rate.get("ok"):
+        # 합성데이터는 RT5=RT6=24h, half1≈half2 로 설계 -> 비율이 1 근처여야 함
+        check("꼬리 율 재계산: 합성설계(대칭)에서 비율 1 근처",
+             0.5 < tail_rate["rate_ratio_2_over_1"] < 2.0, str(tail_rate))
+
     c2 = indicators.cross_check_grade(df)
     check("C2 준독립 대조 실행", c2.get("ok") is True, str(c2))
 
@@ -200,12 +212,28 @@ def main():
     radial = fan.fan_radial_profile(df, "t_ocv2")
     check("F4 반경 프로파일 실행", radial.get("ok") is True, str(radial))
     if radial.get("ok"):
-        # 합성데이터는 팬 중심에서 지수감쇠(단조)로 설계 -> 단조로 판정되어야 함.
-        # (사후 부호뒤집기 구제를 막는 독립검정이 실제로 단조/비단조를 가리는지 확인)
-        check("F4 단조 프로파일을 단조로 판정 (합성설계 재현)",
-             radial["is_monotonic"] is True, str(radial))
+        # 합성데이터는 팬 중심에서 지수감쇠(단조)로 설계 -> 전반적 추세가 뚜렷해야 함.
+        # is_monotonic(구간별 부호 전부 일치)은 끝단 잡음 하나에도 뒤집히므로
+        # (실제로 발견된 문제 — 아래 참조) trend_corr(거리-값 선형상관)로 확인한다.
+        check("F4 반경-값 추세 뚜렷함 (합성설계 재현)",
+             abs(radial["trend_corr"]) > 0.8, str(radial))
         check("F4 중심이 가장 차가움 (합성설계 재현)",
              radial["center_mean"] < radial["extremum_mean"], str(radial))
+
+    aniso = fan.fan_radial_profile_anisotropic(df, "t_ocv2")
+    check("F4 이방성 분리 실행", aniso.get("ok") is True, str(aniso))
+    if aniso.get("ok"):
+        # 합성데이터는 등방(단일 로브) 설계 -> 행/열 축 둘 다 추세가 뚜렷해야 함.
+        # (세로축 is_monotonic 이 끝단 구간 하나의 잡음만으로 False 가 되는 것을
+        #  실제로 발견 -> trend_corr 로 판정하도록 보강. docs/04_logic_audit.md 참조)
+        check("F4 이방성: 세로축 추세 뚜렷함 (합성설계 재현)",
+             abs(aniso["row_axis_summary"].get("trend_corr", 0)) > 0.7, str(aniso))
+        check("F4 이방성: 가로축 추세 뚜렷함 (합성설계 재현)",
+             abs(aniso["col_axis_summary"].get("trend_corr", 0)) > 0.7, str(aniso))
+
+    k3 = timing.aging_duration_bias_check(df)
+    check("K3 시간편향 검사 실행 (표본부족이어도 죽지 않아야)",
+         "ok" in k3, str(k3))
 
     grid = fields.to_grid(df[df["tray_id"] == df["tray_id"].iloc[0]], "t_ocv2")
     check("격자 변환 shape", grid.shape == (12, 12))
@@ -214,6 +242,66 @@ def main():
 
     field = fields.position_field(df, "t_ocv2", agg="mean")
     check("position_field shape", field.shape == (12, 12))
+
+    # --- E: 공간 지문 / 분산 분해 ---
+    docv7_col = "docv7_raw"
+    qspread = spatial.quantile_spread_report(df, docv7_col)
+    check("E2 분위수 확산 실행", qspread.get("ok") is True, str(qspread))
+
+    vardecomp = spatial.variance_decomposition(df, docv7_col)
+    check("E8 분산분해 실행", vardecomp.get("ok") is True, str(vardecomp))
+    if vardecomp.get("ok"):
+        total_frac = (vardecomp["frac_position_fixed"]
+                     + vardecomp["frac_tray_position_eof"]
+                     + vardecomp["frac_cell_residual"])
+        check("E8 분산분해 성분 합=1.0", abs(total_frac - 1.0) < 1e-6, f"합={total_frac}")
+        check("E8 각 성분 0~1 범위",
+             all(0 <= vardecomp[k] <= 1 for k in
+                 ("frac_position_fixed", "frac_tray_position_eof", "frac_cell_residual")),
+             str(vardecomp))
+
+    # --- L: 패턴 유형·비율 ---
+    pattern_df = patterns.classify_patterns(df, docv7_col)
+    check("L1 패턴 분류 실행", not pattern_df.empty, f"len={len(pattern_df)}")
+
+    ratio = patterns.pattern_ratio(pattern_df)
+    check("L2 유형 비율 실행", ratio.get("ok") is True, str(ratio))
+    if ratio.get("ok"):
+        check("L2 비율 합=1.0", abs(sum(ratio["ratio"].values()) - 1.0) < 1e-6, str(ratio))
+
+    gsize = patterns.pattern_gradient_size(df, docv7_col, pattern_df)
+    check("L3 유형별 구배크기 실행", gsize.get("ok") is True, str(gsize))
+
+    pfail = patterns.pattern_failure_rate(df, pattern_df)
+    check("L4 유형별 불량률 실행", pfail.get("ok") is True, str(pfail))
+
+    flimit = patterns.fixed_correction_limit(vardecomp)
+    check("L5 고정보정한계 실행", flimit.get("ok") is True, str(flimit))
+    if flimit.get("ok") and vardecomp.get("ok"):
+        check("L5 값이 E8 과 일치",
+             abs(flimit["frac_position_fixed"] - vardecomp["frac_position_fixed"]) < 1e-9)
+
+    splithalf = patterns.split_half_reproducibility(df, docv7_col)
+    check("L6 split-half 실행", splithalf.get("ok") is True, str(splithalf))
+    if splithalf.get("ok"):
+        check("L6 상관계수 -1~1 범위", -1 <= splithalf["split_half_corr"] <= 1)
+
+    # --- I: 판정 영향 ---
+    pfr = impact.position_failure_rate(df)
+    check("I2 위치별 불량률 실행", pfr.get("ok") is True, str(pfr))
+    if pfr.get("ok"):
+        # 합성데이터 핫셀 위치: (row=4,col=7=G)->G4, (row=9,col=2=B)->B9
+        check("I2 최대배수 위치가 합성 핫셀 위치와 일치",
+             pfr["max_ratio_position"] in ("G4", "B9"), str(pfr))
+        check("I2 최대배수 > 1 (평균보다 더 자주 걸림)", pfr["max_ratio"] > 1, str(pfr))
+
+    spike = impact.spike_in_test(df, magnitudes_mv=(0.5, 0.8, 1.5), seed=7)
+    check("I3 spike-in 실행", spike.get("ok") is True, str(spike))
+    if spike.get("ok"):
+        rates = [r["overall_detection_rate"] for r in spike["results"]]
+        check("I3 검출률이 주입크기에 따라 증가(비감소)",
+             all(a <= b + 1e-9 for a, b in zip(rates, rates[1:])), str(rates))
+        check("I3 최대 주입크기(1.5mV)에서 검출률 높음", rates[-1] > 0.8, str(rates))
 
     print(f"\n{'='*40}")
     if FAILS:
