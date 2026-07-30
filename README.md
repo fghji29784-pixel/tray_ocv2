@@ -67,8 +67,16 @@ python -m tray_ocv2.cli inspect --input "<Export파일>.xlsx"
 
 # 3) 전체 진단 실행 (A→K→C→F 순, docs/01_analysis_plan.md 실행순서 참고)
 python -m tray_ocv2.cli run --input "<Export파일>.xlsx" --outdir reports/run1
-# → reports/run1/report_auto.md, figures/*.png, processed_cell_table.csv
+# → reports/run1/report_auto.md, figures/*.png(진단용 F/E1/I2 등), processed_cell_table.csv
+
+# 4) ★발표용 시각화(S1~S4, V0~V16)는 run과 별개 명령이다 — 반드시 따로 실행
+python -m tray_ocv2.cli figures --input "<Export파일>.xlsx" --outdir reports/presentation
+# → reports/presentation/figures/S1_*.png, V0_*.png ... V16_*.png (docs/06_visualization_plan.md 참고)
 ```
+
+**`run` vs `figures` 헷갈리지 말 것**: `run` 은 콘솔에 수치를 찍는 **진단** 명령이고(그림도 몇 장 만들지만
+진단용 부산물일 뿐), `figures` 는 **발표 자료용** 그림 전체(S1~S4·V0~V16)를 만드는 별도 명령이다.
+`run` 만 실행하면 발표용 그림은 하나도 안 나온다 — 반드시 `figures` 를 따로 실행해야 한다.
 
 **실행 환경 제약**: Python 3.8 · 32bit · **scipy/sklearn 없음** → 통계·회귀·이상탐지를
 전부 numpy로 직접 구현한다. 한글 폰트(Malgun Gothic)는 사용 가능 → **그림 라벨 전부 한글**.
