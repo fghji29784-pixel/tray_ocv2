@@ -389,6 +389,8 @@ def classify_thermal_state(therm_key: str) -> str:
 # 호기별 기류가 다르므로(2·3호 바닥6×6+앞뒤외기 / 4·5호 윗4-5-4+바닥4×4+측면외기)
 # 팬 서명(F 그룹)은 호기별로 분리해 분석해야 한다.
 _BOX_MP_TOKEN_RE = re.compile(r"#\s*MP\s*(\d+)\s*-\s*(\d+)", re.IGNORECASE)
+#: "BOX #{연:02d}-{단:02d}" — 연(bay, 가로 1~14) · 단(tier, 높이 1~10). "4연 5단" 예: `#04-05`
+_BOX_SLOT_RE = re.compile(r"BOX\s*#\s*(\d+)\s*-\s*(\d+)", re.IGNORECASE)
 
 #: (MP앞자리, MP뒷자리) → 호기 번호. #MP1-1(=1호 추정)은 값 미제공이라 뺐다 → unknown 처리.
 CHARGER_BY_MP_TOKEN = {(1, 2): 2, (2, 1): 3, (2, 2): 4, (2, 3): 5}
@@ -397,19 +399,40 @@ CHARGER_BY_MP_TOKEN = {(1, 2): 2, (2, 1): 3, (2, 2): 4, (2, 3): 5}
 CHARGER_BOTTOM_FAN_GRID = {2: (6, 6), 3: (6, 6), 4: (4, 4), 5: (4, 4)}
 #: 호기별 추가 외기 방향. 'col_A'=A쪽 횡류, 'col_L'=L쪽 횡류, 'row_ends'=앞뒤(세로) 외기.
 CHARGER_EXTRA_AIRFLOW = {2: "row_ends", 3: "row_ends", 4: "col_A", 5: "col_L"}
+#: 랙 크기 — 호기당 연(가로) 1~14, 단(높이) 1~10.
+BAY_MAX, TIER_MAX = 14, 10
 
 
-def charger_from_box(box_value) -> int | None:
-    """박스 문자열 → 충방전기 호기 번호(2~5). 매칭 실패/미등록이면 None.
+def parse_box(box_value) -> dict | None:
+    """박스 문자열 → {'charger': 호기(2~5), 'bay': 연(1~14), 'tier': 단(1~10)}.
 
-    호기별로 냉각 기류 형상이 다르므로(§3.3), 온도 지문을 이 값으로 층화해야 한다.
+    예: "CDC #MP2 -2-BOX #04-05 (1-4-5)" → {'charger':4, 'bay':4, 'tier':5} (4호 4연 5단).
+    - 호기: `#MP{a}-{b}` 토큰(CHARGER_BY_MP_TOKEN). 미등록이면 charger=None.
+    - 연·단: `BOX #{연}-{단}` 슬롯. 없으면 bay/tier=None.
+    셋 다 못 뽑으면 None. 트레이의 랙 내 위치(연·단)는 호기별 기류 분석의 층화 축이다(§3.3).
     """
     if box_value is None:
         return None
-    m = _BOX_MP_TOKEN_RE.search(str(box_value))
-    if not m:
+    s = str(box_value)
+    charger = bay = tier = None
+    m = _BOX_MP_TOKEN_RE.search(s)
+    if m:
+        charger = CHARGER_BY_MP_TOKEN.get((int(m.group(1)), int(m.group(2))))
+    m2 = _BOX_SLOT_RE.search(s)
+    if m2:
+        bay, tier = int(m2.group(1)), int(m2.group(2))
+    if charger is None and bay is None and tier is None:
         return None
-    return CHARGER_BY_MP_TOKEN.get((int(m.group(1)), int(m.group(2))))
+    return {"charger": charger, "bay": bay, "tier": tier}
+
+
+def charger_from_box(box_value) -> int | None:
+    """박스 문자열 → 충방전기 호기 번호(2~5). 실패/미등록이면 None. `parse_box` 편의 래퍼.
+
+    호기별로 냉각 기류 형상이 다르므로(§3.3), 온도 지문을 이 값으로 층화해야 한다.
+    """
+    info = parse_box(box_value)
+    return info["charger"] if info else None
 
 
 # ---------------------------------------------------------------------------

@@ -95,6 +95,17 @@ def check_charger_from_box():
         got = schema.charger_from_box(raw)
         check(f"박스→호기 파싱: {raw!r}→{expected}", got == expected, f"got={got}")
 
+    # 연·단까지 뽑는 parse_box (예: 4호 4연 5단)
+    info = schema.parse_box("CDC #MP2 -2-BOX #04-05 (1-4-5)")
+    check("parse_box: 4호 4연 5단",
+         info == {"charger": 4, "bay": 4, "tier": 5}, str(info))
+    info2 = schema.parse_box("CDC #MP1 -2-BOX #03-06 (1-3-6)")
+    check("parse_box: 2호 3연 6단",
+         info2 == {"charger": 2, "bay": 3, "tier": 6}, str(info2))
+    check("parse_box: 미등록 호기라도 연·단은 뽑음",
+         schema.parse_box("CDC #MP9 -9-BOX #07-02") == {"charger": None, "bay": 7, "tier": 2})
+    check("parse_box: 완전 무관 문자열 → None", schema.parse_box("가짜값") is None)
+
 
 def main():
     check_korean_ampm_parsing()

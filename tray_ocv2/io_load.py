@@ -48,6 +48,15 @@ def _to_numeric(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
 
 
+def _add_box_cols(cols: dict, key: str, series: pd.Series) -> None:
+    """박스 원문 + 파싱된 호기/연/단 컬럼을 추가한다 (충·방전·OCV 공용)."""
+    parsed = series.map(schema.parse_box)
+    cols[f"box_{key}"] = series
+    cols[f"charger_{key}"] = parsed.map(lambda d: d["charger"] if d else None)
+    cols[f"bay_{key}"] = parsed.map(lambda d: d["bay"] if d else None)
+    cols[f"tier_{key}"] = parsed.map(lambda d: d["tier"] if d else None)
+
+
 #: '2026-07-08 오전 5:39:34' 형식 — pandas 기본 파서가 인식 못 하는 한글 오전/오후.
 #: (에이징 시각 컬럼은 엑셀 datetime 셀로 저장돼 있어 이 문제가 없다. OCV/LCI/Charge/
 #:  DisCharge 시각은 문자열로 저장돼 있어 이 파서가 필요하다 — 2026-07 실사례로 확인)
@@ -107,7 +116,8 @@ def build_cell_table(raw: pd.DataFrame) -> pd.DataFrame:
       시각  : start_<stage_key>, end_<stage_key>, dur_<stage_key>(전압 단계)
               start_<therm_key>, end_<therm_key>, dur_<therm_key> (온도 스텝)
               start_<aging_key>, end_<aging_key>, box_<aging_key>
-      설비  : box_<therm_key>(충·방전 박스 원문), charger_<therm_key>(파싱된 호기 2~5)
+      설비  : box_<key>(박스 원문), charger_<key>(호기 2~5), bay_<key>(연 1~14), tier_<key>(단 1~10)
+              — OCV/충·방전 스텝별. 트레이가 세션마다 다른 호기·연·단일 수 있어 스텝별로 붙는다
       기타  : docv7_raw (Delta OCV #07 컬럼), pol_<end_voltage_col> (있는 것만)
     """
     cols: dict[str, pd.Series] = {}
@@ -143,8 +153,7 @@ def build_cell_table(raw: pd.DataFrame) -> pd.DataFrame:
         if s.dur_col and s.dur_col in raw.columns:
             cols[f"dur_{s.key}"] = _to_numeric(raw[s.dur_col])
         if s.box_col and s.box_col in raw.columns:
-            cols[f"box_{s.key}"] = raw[s.box_col]
-            cols[f"charger_{s.key}"] = raw[s.box_col].map(schema.charger_from_box)
+            _add_box_cols(cols, s.key, raw[s.box_col])
 
     for t in schema.THERM_STEPS:
         for stat, col in t.temp_cols.items():
@@ -157,8 +166,7 @@ def build_cell_table(raw: pd.DataFrame) -> pd.DataFrame:
         if t.dur_col and t.dur_col in raw.columns:
             cols[f"dur_{t.key}"] = _to_numeric(raw[t.dur_col])
         if t.box_col and t.box_col in raw.columns:
-            cols[f"box_{t.key}"] = raw[t.box_col]
-            cols[f"charger_{t.key}"] = raw[t.box_col].map(schema.charger_from_box)
+            _add_box_cols(cols, t.key, raw[t.box_col])
 
     for a in schema.AGING:
         if a.start_col in raw.columns:
