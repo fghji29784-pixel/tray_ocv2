@@ -634,3 +634,109 @@ def charger_stage_report(df: pd.DataFrame, value_col: str, charger_col: str) -> 
         "eof_mode1": charger_eof_mode1(df, value_col, charger_col),
         "special_cell_contrast": charger_special_cell_contrast(df, value_col, charger_col),
     }
+
+
+# ---------------------------------------------------------------------------
+# 연(bay)·단(tier) 교란 점검 — 호기 효과가 진짜 팬(호기) 고유 효과인지, 그 호기
+# 트레이들이 우연히 특정 랙 위치(연·단)에 몰려서 생긴 착시인지 가른다.
+# io_load 가 만드는 bay_<stage_key>/tier_<stage_key> 컬럼과 함께 쓴다.
+# ---------------------------------------------------------------------------
+
+
+def charger_bay_tier_coverage(df: pd.DataFrame, charger_col: str, bay_col: str,
+                              tier_col: str) -> pd.DataFrame:
+    """[연·단 교란점검 1] 호기별로 연(bay)·단(tier)이 얼마나 다양하게 퍼져 있는지.
+
+    한 호기가 특정 연·단 몇 개에만 몰려 있으면 "호기 효과"와 "그 연·단 위치 효과"를
+    데이터로 분리할 수 없다(완전교락). 넓게 퍼져 있어야 아래 층화분석이 의미 있다.
+    """
+    d = df.copy()
+    d["_uid"] = _tray_uid_col(d)
+    d = d.dropna(subset=[charger_col])
+
+    rows = []
+    for charger, sub in d.groupby(charger_col):
+        uniq = sub[["_uid", bay_col, tier_col]].drop_duplicates(subset="_uid")
+        bay_ok = uniq[bay_col].notna()
+        tier_ok = uniq[tier_col].notna()
+        rows.append({
+            "charger": int(charger), "n_trays": int(uniq["_uid"].nunique()),
+            "n_distinct_bay": int(uniq.loc[bay_ok, bay_col].nunique()),
+            "n_distinct_tier": int(uniq.loc[tier_ok, tier_col].nunique()),
+            "bay_min": (int(uniq.loc[bay_ok, bay_col].min()) if bay_ok.any() else None),
+            "bay_max": (int(uniq.loc[bay_ok, bay_col].max()) if bay_ok.any() else None),
+            "tier_min": (int(uniq.loc[tier_ok, tier_col].min()) if tier_ok.any() else None),
+            "tier_max": (int(uniq.loc[tier_ok, tier_col].max()) if tier_ok.any() else None),
+        })
+    out = pd.DataFrame(rows).sort_values("charger", ignore_index=True)
+    return out.assign(note=(
+        "n_distinct_bay/tier 가 작으면(예 <5) 그 호기는 랙의 좁은 구역에만 몰려 있다는 "
+        "뜻 — 호기 효과와 연·단 효과가 교락돼 아래 층화분석 신뢰도가 떨어진다"))
+
+
+def charger_directional_profile_by_tier(df: pd.DataFrame, value_col: str, charger_col: str,
+                                        tier_col: str) -> pd.DataFrame:
+    """[연·단 교란점검 2 — 핵심] 단(tier, 높이)별로 층화해 호기별 세로 기울기가
+    일관되게 재현되는지 확인.
+
+    모든 단에서 4호=양수·5호=음수(반전)가 반복되면 "호기(팬) 고유 효과"로 확정할 수
+    있다(특정 단 하나의 우연이 아님). 단마다 부호가 뒤집히거나 사라지면, 실은 특정
+    단(높이) 효과가 호기와 교락된 것일 수 있다 — `charger_bay_tier_coverage` 로 먼저
+    교락 가능성 자체를 확인할 것.
+    """
+    d = df.copy()
+    d["_uid"] = _tray_uid_col(d)
+    d["_dev"] = tray_delta(d, value_col, by="_uid", stat="median")
+    d = d.dropna(subset=["_dev", "row", charger_col, tier_col])
+
+    rows = []
+    for (tier, charger), sub in d.groupby([tier_col, charger_col]):
+        row_mean = sub.groupby("row")["_dev"].mean()
+        row_slope, row_corr = _linreg(row_mean.index.to_numpy(), row_mean.to_numpy())
+        rows.append({
+            "tier": int(tier), "charger": int(charger),
+            "n_trays": int(sub["_uid"].nunique()),
+            "row_slope_per_row": row_slope, "row_corr": row_corr,
+        })
+    return pd.DataFrame(rows).sort_values(["tier", "charger"], ignore_index=True)
+
+
+def bay_tier_gradient(df: pd.DataFrame, value_col: str, bay_col: str,
+                      tier_col: str) -> dict:
+    """[연·단 자체 효과] 호기와 무관하게, 연(가로 랙위치)·단(높이) 자체가 트레이
+    전체 수준에서 체계적 영향을 주는지.
+
+    ★ 트레이 내부 위치편차(tray_delta)가 아니라 **트레이별 원본값 평균**을 연·단에
+    회귀한다 — 단(tier) 효과는 "트레이 전체가 통째로 더 덥거나 차가운가"라서, 트레이
+    내부 편차만 보면(트레이 median을 빼버리면) 이 효과 자체가 상쇄돼 사라진다.
+    """
+    d = df.copy()
+    d["_uid"] = _tray_uid_col(d)
+    tray_level = d.groupby("_uid").agg(
+        value=(value_col, "mean"), bay=(bay_col, "first"), tier=(tier_col, "first"))
+    tray_level = tray_level.dropna()
+    if len(tray_level) < 10:
+        return {"ok": False, "reason": "표본 부족"}
+
+    bay_slope, bay_corr = _linreg(tray_level["bay"].to_numpy(), tray_level["value"].to_numpy())
+    tier_slope, tier_corr = _linreg(tray_level["tier"].to_numpy(), tray_level["value"].to_numpy())
+    return {
+        "ok": True, "n_trays": int(len(tray_level)),
+        "n_bay": int(tray_level["bay"].nunique()), "n_tier": int(tray_level["tier"].nunique()),
+        "bay_slope": bay_slope, "bay_corr": bay_corr,
+        "tier_slope": tier_slope, "tier_corr": tier_corr,
+        "note": ("tier_slope 가 뚜렷하면 높이에 따른 열성층(위/아래 온도차)이 실재한다는 "
+                "뜻. bay_slope 가 뚜렷하면 연(가로 랙위치)에 따른 체계 효과(외기 입구 "
+                "근접도 등)가 있다는 뜻. 둘 다 트레이 전체 평균 기준(위치편차 아님)"),
+    }
+
+
+def charger_bay_tier_report(df: pd.DataFrame, value_col: str, charger_col: str,
+                            bay_col: str, tier_col: str) -> dict:
+    """[편의 함수] 연·단 교란점검 3종을 한 번에 실행."""
+    return {
+        "coverage": charger_bay_tier_coverage(df, charger_col, bay_col, tier_col),
+        "row_slope_by_tier": charger_directional_profile_by_tier(
+            df, value_col, charger_col, tier_col),
+        "bay_tier_gradient": bay_tier_gradient(df, value_col, bay_col, tier_col),
+    }

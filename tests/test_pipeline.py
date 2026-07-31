@@ -169,12 +169,68 @@ def check_charger_functions():
          set(report.keys()) == {"directional_profile", "eof_mode1", "special_cell_contrast"})
 
 
+def check_charger_bay_tier_functions():
+    """[2026-07-31] 연·단 교란점검 3종 — 합성 데이터로 검증.
+
+    4호=세로(행) 기울기 양수, 5호=음수(반전)를 모든 단(tier)에서 동일하게 재현되도록
+    설계(호기 고유 효과가 단과 무관해야 한다는 것)하고, 별도로 tier 에 트레이 전체
+    수준의 오프셋(높이에 따라 통째로 더워짐)을 심어 bay_tier_gradient 가 그것만
+    따로 잡아내는지 확인한다(tray_delta 로 상쇄되지 않는 효과인지가 핵심).
+    """
+    rng = np.random.default_rng(1)
+    rows = []
+    n_trays_per_combo = 15
+    for charger in (4, 5):
+        for tier in (1, 2, 3):
+            for ti in range(n_trays_per_combo):
+                tray_id = f"T{charger}_{tier}_{ti:03d}"
+                bay = (ti % 14) + 1
+                for row in range(1, 13):
+                    for col in range(1, 13):
+                        row_signal = 0.05 * (row - 6.5) if charger == 4 else -0.05 * (row - 6.5)
+                        tier_signal = 0.15 * tier   # 단이 높을수록 트레이 전체가 따뜻해짐
+                        rows.append({
+                            "product_lot": "LOT1", "tray_id": tray_id, "row": row, "col": col,
+                            "t_x": 25.0 + row_signal + tier_signal + rng.normal(0, 0.01),
+                            "charger_x": charger, "bay_x": bay, "tier_x": tier,
+                        })
+    df = pd.DataFrame(rows)
+
+    cov = fan.charger_bay_tier_coverage(df, "charger_x", "bay_x", "tier_x")
+    check("연단함수: 커버리지가 호기 2개(4,5) 전부 계산됨",
+         set(cov["charger"]) == {4, 5}, str(cov))
+    check("연단함수: 연(bay)이 여러 값으로 퍼짐(교락 아님, 합성설계 재현)",
+         (cov["n_distinct_bay"] >= 10).all(), str(cov))
+    check("연단함수: 단(tier) 3개 전부 커버됨",
+         (cov["n_distinct_tier"] == 3).all(), str(cov))
+
+    by_tier = fan.charger_directional_profile_by_tier(df, "t_x", "charger_x", "tier_x")
+    for tier in (1, 2, 3):
+        r4 = by_tier.loc[(by_tier["tier"] == tier) & (by_tier["charger"] == 4),
+                         "row_slope_per_row"].iloc[0]
+        r5 = by_tier.loc[(by_tier["tier"] == tier) & (by_tier["charger"] == 5),
+                         "row_slope_per_row"].iloc[0]
+        check(f"연단함수: 단{tier}에서도 4/5호 세로기울기 부호반전 재현(호기 고유효과)",
+             r4 > 0.02 and r5 < -0.02, f"tier{tier}: row_slope_4={r4}, row_slope_5={r5}")
+
+    grad = fan.bay_tier_gradient(df, "t_x", "bay_x", "tier_x")
+    check("연단함수: bay_tier_gradient 실행", grad.get("ok") is True, str(grad))
+    if grad.get("ok"):
+        check("연단함수: 단(tier) 기울기가 뚜렷하게 검출됨(합성설계 재현, 높이에 따라 더워짐)",
+             grad["tier_slope"] > 0.1, str(grad))
+
+    full = fan.charger_bay_tier_report(df, "t_x", "charger_x", "bay_x", "tier_x")
+    check("연단함수: charger_bay_tier_report 편의함수 실행",
+         set(full.keys()) == {"coverage", "row_slope_by_tier", "bay_tier_gradient"})
+
+
 def main():
     check_korean_ampm_parsing()
     check_disattenuated_corr()
     check_fan_col_predictions()
     check_charger_from_box()
     check_charger_functions()
+    check_charger_bay_tier_functions()
 
     raw = make_export(n_trays=30, seed=1)
     check("합성 데이터 생성", len(raw) == 30 * 144, f"len={len(raw)}")
