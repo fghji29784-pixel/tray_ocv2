@@ -107,11 +107,74 @@ def check_charger_from_box():
     check("parse_box: 완전 무관 문자열 → None", schema.parse_box("가짜값") is None)
 
 
+def check_charger_functions():
+    """[2026-07-31] 호기별 기류 분석 4종 — 합성 데이터(호기별 다른 방향 구배 설계)로 검증.
+
+    4호=가로(A→L) 기울기 양수, 5호=음수(반전), 2·3호=세로(행) 기울기만 뚜렷하도록
+    설계한 뒤, 이 무늬가 함수로 정확히 복원되는지 확인한다. 두 랏(LOT1/LOT2)에 같은
+    tray_id 를 재사용해 _tray_uid_col 의 랏 충돌 방지도 같이 검증한다.
+    """
+    rng = np.random.default_rng(0)
+    rows = []
+    n_trays = 30
+    for charger in (2, 3, 4, 5):
+        for lot in ("LOT1", "LOT2"):
+            for ti in range(n_trays):
+                tray_id = f"T{ti:03d}"  # 랏마다 재사용(충돌 시나리오)
+                for row in range(1, 13):
+                    for col in range(1, 13):
+                        if charger == 4:
+                            signal = 0.05 * (col - 6.5)
+                        elif charger == 5:
+                            signal = -0.05 * (col - 6.5)
+                        else:
+                            signal = 0.05 * (row - 6.5)
+                        rows.append({
+                            "product_lot": lot, "tray_id": tray_id, "row": row, "col": col,
+                            "t_ocv2": 25.0 + signal + rng.normal(0, 0.01),
+                            "charger_ocv2": charger,
+                        })
+    df = pd.DataFrame(rows)
+
+    uid = fan._tray_uid_col(df)
+    check("호기함수: 여러 랏 tray_id 충돌 방지(uid 고유값=랏수×트레이수)",
+         uid.nunique() == 2 * n_trays, f"n_unique={uid.nunique()}")
+
+    prof = fan.charger_directional_profile(df, "t_ocv2", "charger_ocv2")
+    by_charger = {int(r["charger"]): r for _, r in prof.iterrows()}
+    check("호기함수: 4호 가로기울기 양수(합성설계 재현)",
+         by_charger[4]["col_slope_per_col"] > 0.03, str(by_charger[4]))
+    check("호기함수: 5호 가로기울기 음수(4호 반전, 합성설계 재현)",
+         by_charger[5]["col_slope_per_col"] < -0.03, str(by_charger[5]))
+    check("호기함수: 2호는 세로기울기만 뚜렷(가로는 약함)",
+         abs(by_charger[2]["col_slope_per_col"]) < 0.01
+         and abs(by_charger[2]["row_slope_per_row"]) > 0.03, str(by_charger[2]))
+
+    diff = fan.charger_diff_map(df, "t_ocv2", "charger_ocv2", 4, 5)
+    check("호기함수: 4-5호 차분 실행", diff.get("ok") is True, str(diff))
+    if diff.get("ok"):
+        col_means = np.nanmean(diff["diff"].to_numpy(), axis=0)
+        check("호기함수: 4-5호 차분에서 가로방향 뚜렷한 경사(측면외기 좌우비대칭 재현)",
+             col_means[-1] - col_means[0] > 0.5, str(col_means))
+
+    eof = fan.charger_eof_mode1(df, "t_ocv2", "charger_ocv2")
+    check("호기함수: EOF 모드1이 4개 호기 전부 계산됨",
+         set(eof.keys()) == {2, 3, 4, 5}, str(list(eof.keys())))
+
+    contrast = fan.charger_special_cell_contrast(df, "t_ocv2", "charger_ocv2")
+    check("호기함수: 8셀 대조 실행(결과 있음)", not contrast.empty, str(contrast))
+
+    report = fan.charger_stage_report(df, "t_ocv2", "charger_ocv2")
+    check("호기함수: charger_stage_report 편의함수 실행",
+         set(report.keys()) == {"directional_profile", "eof_mode1", "special_cell_contrast"})
+
+
 def main():
     check_korean_ampm_parsing()
     check_disattenuated_corr()
     check_fan_col_predictions()
     check_charger_from_box()
+    check_charger_functions()
 
     raw = make_export(n_trays=30, seed=1)
     check("합성 데이터 생성", len(raw) == 30 * 144, f"len={len(raw)}")

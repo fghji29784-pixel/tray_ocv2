@@ -20,6 +20,7 @@ import pandas as pd
 
 from . import schema
 from .fields import cell_edge_distance, position_field, tray_delta
+from .spatial import build_tray_matrix, pca_modes
 
 
 def row_profile(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
@@ -462,4 +463,162 @@ def heat_vs_amplitude_regression(df: pd.DataFrame,
         "table": table, "ok": True, "corr": r, "slope": slope, "intercept": intercept,
         "note": ("발열량(최고-최저 중앙값, °C) vs 필드 진폭(RMS) 의 스텝간 상관·기울기. "
                 "이분법(F3-구버전) 대체. corr·slope 모두 뚜렷한 양수여야 F3 지지"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 호기별(충방전기 2~5호) 기류 분석 — docs/00_facts.md §3.3 (2026-07-31 확인)
+#
+# 2·3호는 트레이 아래 6×6 바닥팬 + 앞뒤(세로축) 외기, 4·5호는 윗팬(4-5-4, 하향) +
+# 바닥 4×4(상향) + 측면 외기(4호=A쪽, 5호=L쪽). schema.charger_from_box() /
+# schema.parse_box() 로 뽑은 charger_<stage_key> 컬럼(값 2~5)으로 층화해 검증한다.
+# ---------------------------------------------------------------------------
+
+
+def _tray_uid_col(df: pd.DataFrame) -> pd.Series:
+    """여러 랏을 합쳐도 트레이ID 충돌이 없는 고유 키. `product_lot` 있으면 그것과 결합.
+
+    docs/00_facts.md §2.1 Q6(트레이 ID의 랏 간 재사용 여부 미확인) 때문에, 랏을 여러 개
+    합칠 때 `tray_id` 단독으로 묶으면 서로 다른 물리 트레이가 섞일 위험이 있다.
+    """
+    if "product_lot" in df.columns:
+        return df["product_lot"].astype(str) + "_" + df["tray_id"].astype(str)
+    return df["tray_id"].astype(str)
+
+
+def _linreg(x, y) -> tuple[float, float]:
+    """단순 선형회귀 기울기·상관계수. scipy 없이 numpy만(§00_facts 실행환경 제약)."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    if ok.sum() < 3 or np.std(x[ok]) < 1e-9:
+        return np.nan, np.nan
+    slope, _intercept = np.polyfit(x[ok], y[ok], 1)
+    r = float(np.corrcoef(x[ok], y[ok])[0, 1])
+    return float(slope), r
+
+
+def charger_directional_profile(df: pd.DataFrame, value_col: str,
+                                charger_col: str) -> pd.DataFrame:
+    """[②방향성 구배] 호기별 가로(A~L)·세로(1~12) 위치편차 기울기.
+
+    §3.3 예측의 직접 검정: 4호는 가로 기울기가 뚜렷(A쪽 외기 → A가 차가움), 5호는
+    반대부호(L쪽 외기), 2·3호는 가로 기울기 대신 세로 기울기(앞뒤 외기)가 뚜렷해야 한다.
+    """
+    d = df.copy()
+    d["_uid"] = _tray_uid_col(d)
+    d["_dev"] = tray_delta(d, value_col, by="_uid", stat="median")
+    d = d.dropna(subset=["_dev", "row", "col", charger_col])
+
+    rows = []
+    for charger, sub in d.groupby(charger_col):
+        col_mean = sub.groupby("col")["_dev"].mean()
+        row_mean = sub.groupby("row")["_dev"].mean()
+        col_slope, col_corr = _linreg(col_mean.index.to_numpy(), col_mean.to_numpy())
+        row_slope, row_corr = _linreg(row_mean.index.to_numpy(), row_mean.to_numpy())
+        rows.append({
+            "charger": int(charger),
+            "n_trays": int(sub["_uid"].nunique()), "n_cells": int(len(sub)),
+            "col_slope_per_col": col_slope, "col_corr": col_corr,
+            "row_slope_per_row": row_slope, "row_corr": row_corr,
+        })
+    out = pd.DataFrame(rows).sort_values("charger", ignore_index=True)
+    return out.assign(note=(
+        "col_slope: 열(A=1~L=12) 방향 기울기(값/열). row_slope: 행(1~12) 방향 기울기. "
+        "4호=col_slope 양수 예측, 5호=음수(반전), 2·3호=row_slope 만 뚜렷 예측"))
+
+
+def charger_eof_mode1(df: pd.DataFrame, value_col: str, charger_col: str,
+                      n_modes: int = 1) -> dict:
+    """[③EOF 모드1] 호기별 지배 공간 패턴을 링/역링 가정 없이 데이터에서 직접 뽑는다.
+
+    링·역링을 미리 정해두고 맞는지 보는 대신, 각 호기의 (트레이×144위치) 행렬을
+    PCA(EOF, numpy SVD)로 분해해 실제로 가장 많이 반복되는 무늬 자체를 얻는다.
+    """
+    d = df.copy()
+    d["_uid"] = _tray_uid_col(d)
+    d["_dev"] = tray_delta(d, value_col, by="_uid", stat="median")
+    d = d.dropna(subset=[charger_col])
+
+    out = {}
+    for charger, sub in d.groupby(charger_col):
+        _, mat = build_tray_matrix(sub, value_col="_dev", tray_col="_uid",
+                                   already_relative=True)
+        out[int(charger)] = pca_modes(mat, n_modes=n_modes)
+    return out
+
+
+def charger_diff_map(df: pd.DataFrame, value_col: str, charger_col: str,
+                     charger_a: int = 4, charger_b: int = 5) -> dict:
+    """[⑥4-5호 차분] 두 호기의 위치 지도를 직접 뺀다.
+
+    4·5호는 바닥 4×4 팬 등 공통 요소가 많다 — 그대로 빼면 공통분은 상쇄되고
+    **측면 외기 방향 차이(4호=A쪽, 5호=L쪽)만 남아야 한다**(가로 방향 비대칭 예측).
+    """
+    d = df.copy()
+    d["_uid"] = _tray_uid_col(d)
+    d["_dev"] = tray_delta(d, value_col, by="_uid", stat="median")
+
+    sub_a = d[d[charger_col] == charger_a]
+    sub_b = d[d[charger_col] == charger_b]
+    if sub_a.empty or sub_b.empty:
+        return {"ok": False, "reason": f"호기 {charger_a} 또는 {charger_b} 데이터 없음"}
+
+    field_a = position_field(sub_a, "_dev", agg="mean")
+    field_b = position_field(sub_b, "_dev", agg="mean")
+    diff = field_a - field_b
+    return {
+        "ok": True, "charger_a": charger_a, "charger_b": charger_b,
+        "field_a": field_a, "field_b": field_b, "diff": diff,
+        "n_trays_a": int(sub_a["_uid"].nunique()), "n_trays_b": int(sub_b["_uid"].nunique()),
+        "note": "diff = field_a − field_b. 가로(열) 방향으로 뚜렷한 경사가 남아야 측면외기 가설 지지",
+    }
+
+
+#: [⑧] 안쪽 4×4 박스 꼭지점(팬격자 접점 후보) / 바깥 트레이 꼭지점. (열문자, 행) 좌표.
+SPECIAL_CELL_GROUPS = {
+    "inner_corners": [("E", 5), ("E", 8), ("H", 5), ("H", 8)],
+    "outer_corners": [("A", 1), ("A", 12), ("L", 1), ("L", 12)],
+}
+
+
+def charger_special_cell_contrast(df: pd.DataFrame, value_col: str,
+                                  charger_col: str) -> pd.DataFrame:
+    """[⑧8셀 대조] 안쪽 4×4 꼭지점·바깥 꼭지점이 호기별로도 이상값인지 대조.
+
+    이 8셀이 순수 바닥 팬격자 아티팩트라면, 4×4 격자인 4·5호에서 격자 위치와 정렬돼
+    강하게 나오고, 6×6 격자인 2·3호에서는 격자 위치가 달라 약하게(또는 안) 나와야 한다.
+    `vs_typical_abs_ratio` 가 1보다 훨씬 크면 "그 호기에서 이 자리가 유독 튄다"는 뜻.
+    """
+    d = df.copy()
+    d["_uid"] = _tray_uid_col(d)
+    d["_dev"] = tray_delta(d, value_col, by="_uid", stat="median")
+    d = d.dropna(subset=[charger_col])
+
+    rows = []
+    for charger, sub in d.groupby(charger_col):
+        field = position_field(sub, "_dev", agg="mean")
+        arr = field.to_numpy()
+        typical_abs = float(np.nanmedian(np.abs(arr)))
+        for group_name, cells in SPECIAL_CELL_GROUPS.items():
+            vals = [field.loc[row, col] for col, row in cells
+                   if row in field.index and col in field.columns]
+            if not vals or typical_abs < 1e-12:
+                continue
+            mean_val = float(np.nanmean(vals))
+            rows.append({
+                "charger": int(charger), "cell_group": group_name,
+                "mean_dev": mean_val,
+                "vs_typical_abs_ratio": abs(mean_val) / typical_abs,
+                "n_trays": int(sub["_uid"].nunique()),
+            })
+    return pd.DataFrame(rows).sort_values(["cell_group", "charger"], ignore_index=True)
+
+
+def charger_stage_report(df: pd.DataFrame, value_col: str, charger_col: str) -> dict:
+    """[편의 함수] 한 스텝(예: t_ocv2 + charger_ocv2)에 대해 ②③⑧을 한 번에 실행."""
+    return {
+        "directional_profile": charger_directional_profile(df, value_col, charger_col),
+        "eof_mode1": charger_eof_mode1(df, value_col, charger_col),
+        "special_cell_contrast": charger_special_cell_contrast(df, value_col, charger_col),
     }
