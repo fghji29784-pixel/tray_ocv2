@@ -469,9 +469,12 @@ def heat_vs_amplitude_regression(df: pd.DataFrame,
 # ---------------------------------------------------------------------------
 # 호기별(충방전기 2~5호) 기류 분석 — docs/00_facts.md §3.3 (2026-07-31 확인)
 #
-# 2·3호는 트레이 아래 6×6 바닥팬 + 앞뒤(세로축) 외기, 4·5호는 윗팬(4-5-4, 하향) +
-# 바닥 4×4(상향) + 측면 외기(4호=A쪽, 5호=L쪽). schema.charger_from_box() /
-# schema.parse_box() 로 뽑은 charger_<stage_key> 컬럼(값 2~5)으로 층화해 검증한다.
+# 2·3호는 트레이 아래 6×6 바닥팬 + 앞뒤 외기, 4·5호는 윗팬(4-5-4, 하향) + 바닥
+# 4×4(상향) + 외기(4호=행1쪽 모서리, 5호=행12쪽 모서리). ★모두 세로(행 1~12)축
+# — 처음엔 "측면"이라는 표현 때문에 가로(A~L)축으로 예측했으나, 실측(아래
+# charger_directional_profile 결과)과 사용자 확인으로 세로축이 맞다고 정정됨
+# (2026-07-31). schema.charger_from_box()/schema.parse_box() 로 뽑은
+# charger_<stage_key> 컬럼(값 2~5)으로 층화해 검증한다.
 # ---------------------------------------------------------------------------
 
 
@@ -502,8 +505,10 @@ def charger_directional_profile(df: pd.DataFrame, value_col: str,
                                 charger_col: str) -> pd.DataFrame:
     """[②방향성 구배] 호기별 가로(A~L)·세로(1~12) 위치편차 기울기.
 
-    §3.3 예측의 직접 검정: 4호는 가로 기울기가 뚜렷(A쪽 외기 → A가 차가움), 5호는
-    반대부호(L쪽 외기), 2·3호는 가로 기울기 대신 세로 기울기(앞뒤 외기)가 뚜렷해야 한다.
+    §3.3 예측(2026-07-31 실측 확정)의 직접 검정: **세로(행) 기울기**가 4호는 뚜렷한
+    양수(행1쪽 외기 → 행1이 차가움), 5호는 뚜렷한 음수(행12쪽 외기, 4호 반전), 2·3호는
+    같은 축이지만 더 약해야 한다. (가로/열 축은 처음엔 "측면"이라는 표현 때문에
+    예측했었으나 실측에서 기각됨 — 외기는 세로축으로 들어온다)
     """
     d = df.copy()
     d["_uid"] = _tray_uid_col(d)
@@ -525,7 +530,8 @@ def charger_directional_profile(df: pd.DataFrame, value_col: str,
     out = pd.DataFrame(rows).sort_values("charger", ignore_index=True)
     return out.assign(note=(
         "col_slope: 열(A=1~L=12) 방향 기울기(값/열). row_slope: 행(1~12) 방향 기울기. "
-        "4호=col_slope 양수 예측, 5호=음수(반전), 2·3호=row_slope 만 뚜렷 예측"))
+        "★핵심 지표는 row_slope — 4호=양수·5호=음수(거울상) 예측, 크기는 2·3호보다 커야 함. "
+        "col_slope 는 참고용(2026-07-31 실측: 4개 호기 전부 약함, 외기와 무관 확인됨)"))
 
 
 def charger_eof_mode1(df: pd.DataFrame, value_col: str, charger_col: str,
@@ -553,7 +559,9 @@ def charger_diff_map(df: pd.DataFrame, value_col: str, charger_col: str,
     """[⑥4-5호 차분] 두 호기의 위치 지도를 직접 뺀다.
 
     4·5호는 바닥 4×4 팬 등 공통 요소가 많다 — 그대로 빼면 공통분은 상쇄되고
-    **측면 외기 방향 차이(4호=A쪽, 5호=L쪽)만 남아야 한다**(가로 방향 비대칭 예측).
+    **외기 방향 차이(4호=행1쪽, 5호=행12쪽)만 남아야 한다**(세로 방향 비대칭 예측).
+    2026-07-31 실측 확정: 행1쪽 파랑(4호가 낮음)·행12쪽 빨강(4호가 높음=5호가 낮음)으로
+    깨끗한 세로 경사 확인, 가로 방향 구조는 거의 없었다.
     """
     d = df.copy()
     d["_uid"] = _tray_uid_col(d)
@@ -571,7 +579,8 @@ def charger_diff_map(df: pd.DataFrame, value_col: str, charger_col: str,
         "ok": True, "charger_a": charger_a, "charger_b": charger_b,
         "field_a": field_a, "field_b": field_b, "diff": diff,
         "n_trays_a": int(sub_a["_uid"].nunique()), "n_trays_b": int(sub_b["_uid"].nunique()),
-        "note": "diff = field_a − field_b. 가로(열) 방향으로 뚜렷한 경사가 남아야 측면외기 가설 지지",
+        "note": "diff = field_a - field_b. 세로(행) 방향 경사가 남아야 외기 가설 지지(실측 확인됨, "
+               "2026-07-31 — 처음엔 가로 방향으로 예측했으나 세로축이 맞았다)",
     }
 
 
@@ -586,9 +595,12 @@ def charger_special_cell_contrast(df: pd.DataFrame, value_col: str,
                                   charger_col: str) -> pd.DataFrame:
     """[⑧8셀 대조] 안쪽 4×4 꼭지점·바깥 꼭지점이 호기별로도 이상값인지 대조.
 
-    이 8셀이 순수 바닥 팬격자 아티팩트라면, 4×4 격자인 4·5호에서 격자 위치와 정렬돼
-    강하게 나오고, 6×6 격자인 2·3호에서는 격자 위치가 달라 약하게(또는 안) 나와야 한다.
-    `vs_typical_abs_ratio` 가 1보다 훨씬 크면 "그 호기에서 이 자리가 유독 튄다"는 뜻.
+    가설(2026-07-31 실측으로 기각됨): 이 8셀이 순수 바닥 팬격자 아티팩트라면 4×4 격자인
+    4·5호에서 강하고 6×6 격자인 2·3호에서 약해야 하는데, 실제로는 **6×6인 3호가 가장
+    강하게** 나왔다 — "바닥 팬격자" 원인은 기각, 정체는 미상. 대신 **바깥 꼭지점**이
+    안쪽보다 훨씬 크게(배율 7~11배) 나오고 **2호만 부호가 반대**였다 — 이쪽이 더 큰
+    미해결 질문으로 남는다. `vs_typical_abs_ratio` 가 1보다 훨씬 크면 "그 호기에서 이
+    자리가 유독 튄다"는 뜻.
     """
     d = df.copy()
     d["_uid"] = _tray_uid_col(d)
