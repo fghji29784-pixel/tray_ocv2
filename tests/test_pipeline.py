@@ -224,6 +224,47 @@ def check_charger_bay_tier_functions():
          set(full.keys()) == {"coverage", "row_slope_by_tier", "bay_tier_gradient"})
 
 
+def check_charger_col_rotation_by_bay():
+    """[2026-07-31] 2·3호 회전풍 가설 — 연(bay)에 따라 콜드스팟이 A→L로 이동하는지.
+
+    연 1에서는 col_slope 가 강한 양수(A차가움), 연 14에서는 강한 음수(L차가움)로
+    선형적으로 회전하도록 합성 설계한 뒤, col_slope_vs_bay_corr 이 뚜렷한 음수로
+    복원되는지 확인한다.
+    """
+    rng = np.random.default_rng(2)
+    rows = []
+    n_trays_per_bay = 8
+    for bay in range(1, 15):
+        # bay=1 -> col_slope 강한 양수, bay=14 -> 강한 음수로 선형 회전
+        target_slope = 0.08 * (7.5 - bay) / 6.5
+        for ti in range(n_trays_per_bay):
+            tray_id = f"T2_{bay}_{ti:03d}"
+            for row in range(1, 13):
+                for col in range(1, 13):
+                    rows.append({
+                        "product_lot": "LOT1", "tray_id": tray_id, "row": row, "col": col,
+                        "t_y": 25.0 + target_slope * (col - 6.5) + rng.normal(0, 0.02),
+                        "charger_y": 2, "bay_y": bay,
+                    })
+    df = pd.DataFrame(rows)
+
+    result = fan.charger_col_rotation_by_bay(df, "t_y", "charger_y", "bay_y")
+    by_bay = result["by_bay"]
+    check("회전풍함수: 연 14개 전부 계산됨", len(by_bay) == 14, str(by_bay))
+
+    slope_bay1 = by_bay.loc[by_bay["bay"] == 1, "col_slope"].iloc[0]
+    slope_bay14 = by_bay.loc[by_bay["bay"] == 14, "col_slope"].iloc[0]
+    check("회전풍함수: 연1은 col_slope 강한 양수(A차가움, 합성설계 재현)",
+         slope_bay1 > 0.03, f"slope_bay1={slope_bay1}")
+    check("회전풍함수: 연14는 col_slope 강한 음수(L차가움, 합성설계 재현)",
+         slope_bay14 < -0.03, f"slope_bay14={slope_bay14}")
+
+    trend = result["trend_summary"]
+    trend_corr = trend.loc[trend["charger"] == 2, "col_slope_vs_bay_corr"].iloc[0]
+    check("회전풍함수: col_slope-연 상관이 뚜렷한 음수(회전풍 가설 재현)",
+         trend_corr < -0.8, f"trend_corr={trend_corr}")
+
+
 def main():
     check_korean_ampm_parsing()
     check_disattenuated_corr()
@@ -231,6 +272,7 @@ def main():
     check_charger_from_box()
     check_charger_functions()
     check_charger_bay_tier_functions()
+    check_charger_col_rotation_by_bay()
 
     raw = make_export(n_trays=30, seed=1)
     check("합성 데이터 생성", len(raw) == 30 * 144, f"len={len(raw)}")

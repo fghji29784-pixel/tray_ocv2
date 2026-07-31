@@ -740,3 +740,51 @@ def charger_bay_tier_report(df: pd.DataFrame, value_col: str, charger_col: str,
             df, value_col, charger_col, tier_col),
         "bay_tier_gradient": bay_tier_gradient(df, value_col, bay_col, tier_col),
     }
+
+
+def charger_col_rotation_by_bay(df: pd.DataFrame, value_col: str, charger_col: str,
+                                bay_col: str) -> dict:
+    """[2·3호 회전풍 가설] 연(bay)이 커질수록 가로(A~L) 콜드스팟이 A→L로 이동하는지.
+
+    2026-07-31 확인된 물리 구조: 2·3호 사이 복도의 바람이 1연 근처에서는 A열을,
+    끝 연(14)에 가까워질수록 L열을 때린다 — 즉 단순 "2호=A축·3호=L축" 고정이 아니라
+    **같은 호기 안에서도 연에 따라 콜드스팟이 회전**한다. 이 때문에 호기 전체를
+    뭉친 `charger_directional_profile`의 col_corr 이 약하게(상쇄돼) 나왔을 수 있다.
+
+    연(bay)별로 가로 기울기(col_slope)를 따로 구한 뒤, **col_slope 자체가 연 번호에
+    따라 체계적으로 변하는지**(2단계 회귀)를 검정한다. 회전풍 가설이 맞으면 연이
+    커질수록 col_slope 가 (A차가움=양수 → L차가움=음수로) **음의 추세**를 보여야 한다.
+    """
+    d = df.copy()
+    d["_uid"] = _tray_uid_col(d)
+    d["_dev"] = tray_delta(d, value_col, by="_uid", stat="median")
+    d = d.dropna(subset=["_dev", "col", charger_col, bay_col])
+
+    by_bay_rows = []
+    for (charger, bay), sub in d.groupby([charger_col, bay_col]):
+        col_mean = sub.groupby("col")["_dev"].mean()
+        slope, corr = _linreg(col_mean.index.to_numpy(), col_mean.to_numpy())
+        by_bay_rows.append({
+            "charger": int(charger), "bay": int(bay),
+            "n_trays": int(sub["_uid"].nunique()),
+            "col_slope": slope, "col_corr": corr,
+        })
+    by_bay = pd.DataFrame(by_bay_rows).sort_values(["charger", "bay"], ignore_index=True)
+
+    summary_rows = []
+    for charger, sub in by_bay.groupby("charger"):
+        sub_ok = sub.dropna(subset=["col_slope"])
+        trend_slope, trend_corr = _linreg(sub_ok["bay"].to_numpy(),
+                                          sub_ok["col_slope"].to_numpy())
+        summary_rows.append({
+            "charger": int(charger), "n_bays_used": int(len(sub_ok)),
+            "col_slope_vs_bay_trend": trend_slope, "col_slope_vs_bay_corr": trend_corr,
+        })
+    trend_summary = pd.DataFrame(summary_rows).sort_values("charger", ignore_index=True)
+
+    return {
+        "by_bay": by_bay, "trend_summary": trend_summary,
+        "note": ("trend_summary 의 col_slope_vs_bay_corr 이 뚜렷한 음수(예 <-0.5)이면 "
+                "회전풍 가설 지지(연 커질수록 콜드스팟이 A→L로 이동). 0 근처면 기각 — "
+                "이 경우 by_bay 를 직접 봐서 다른 패턴(예 계단형)이 있는지 육안 확인할 것"),
+    }
