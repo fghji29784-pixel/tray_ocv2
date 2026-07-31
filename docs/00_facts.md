@@ -173,9 +173,14 @@ LCI > RT1 > OCV1 > C1 > C2 > OCV2 > HT1 > RT2 > OCV3 > C3 > C4 > OCV4 > HT2 > RT
 
    (`#MP1-1`=1호 추정이나 값 미제공 → 코드에서 unknown 처리). 박스가 **세션별로 갈린다**:
    `{C1,C2}` / `{C3,C4}` / `{C5,C6,C7,D1~D7}` — 한 트레이가 세션마다 다른 호기일 수 있으니
-   **온도 지문은 그 스텝의 박스로 층화**한다. (docv7은 PRVT에서 나와 이월 경로가 복잡하나,
-   중간 OCV·충방전 **온도 지문**은 세션 박스로 바로 층화 가능)
-   코드 반영: `schema.charger_from_box()`, `ThermStep.box_col`, io_load `box_/charger_<step>` 컬럼.
+   **온도 지문은 그 스텝의 박스로 층화**한다.
+
+   → **★ 팬 분석엔 `Work BOX_OCV #NN` 하나면 충분하다.** OCV 온도는 충방전기 안에서
+   측정되는 F그룹 주력 온도장이고(§2.2), 각 OCV의 work box = 그 온도를 잰 호기다. 셀은
+   한 세션 내내 같은 호기이므로 OCV box가 그 세션의 충·방전까지 대신 지목한다. (docv7은
+   PRVT에서 나와 이월 경로가 복잡하나, 온도 지문 층화는 OCV box로 깨끗이 됨)
+   코드 반영: `schema.charger_from_box()`, `Stage.box_col`(OCV, `Work BOX_OCV #NN`) +
+   `ThermStep.box_col`(충·방전), io_load `box_/charger_<step>` 컬럼.
 
 **추가 요청 권장 (우선순위)**
 

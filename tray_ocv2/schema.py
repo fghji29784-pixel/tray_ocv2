@@ -176,6 +176,7 @@ class Stage:
     in_charger: bool    # True=충방전기 내부(팬 가동) / False=별도 OCV 계측기
     end_col: str | None = None   # 측정 종료 시각 (현재 미사용 — _ocv() 참조)
     dur_col: str | None = None   # 측정 작업시간 (현재 미사용 — _ocv() 참조)
+    box_col: str | None = None   # 호기 박스 ID (in_charger=True 인 OCV 만. §3.3 팬분석 주력)
 
 
 def _ocv(n: int, order: int, soc: float) -> Stage:
@@ -189,8 +190,10 @@ def _ocv(n: int, order: int, soc: float) -> Stage:
     (요청 불필요, 있는 데이터로 검증).
     """
     p = f"OCV #{n:02d}"
+    # OCV 는 충방전기 내부에서 측정 → work box = 그 순간의 호기. 팬 서명(F그룹)의 주력
+    # 온도장이라, 이 컬럼만으로 호기별 층화가 가능하다(충·방전 박스 없어도 됨, §3.3).
     return Stage(f"ocv{n}", p, order, soc, f"{p} OCV", f"{p}_온도",
-                 f"{p} 시작시간", True)
+                 f"{p} 시작시간", True, box_col=f"Work BOX_{p}")
 
 
 def _prvt(n: int, order: int) -> Stage:
@@ -421,7 +424,7 @@ def all_expected_columns() -> list[str]:
     cols = list(ID_COLS.values()) + [DOCV7_COL] + list(END_VOLTAGE_COLS)
     for s in STAGES:
         cols += [c for c in (s.value_col, s.temp_col, s.start_col,
-                             s.end_col, s.dur_col) if c]
+                             s.end_col, s.dur_col, s.box_col) if c]
     for t in THERM_STEPS:
         cols += [c for c in t.temp_cols.values() if c]
         cols += [c for c in (t.start_col, t.end_col, t.dur_col, t.box_col) if c]

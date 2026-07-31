@@ -142,6 +142,9 @@ def build_cell_table(raw: pd.DataFrame) -> pd.DataFrame:
             cols[f"end_{s.key}"] = _to_datetime(raw[s.end_col])
         if s.dur_col and s.dur_col in raw.columns:
             cols[f"dur_{s.key}"] = _to_numeric(raw[s.dur_col])
+        if s.box_col and s.box_col in raw.columns:
+            cols[f"box_{s.key}"] = raw[s.box_col]
+            cols[f"charger_{s.key}"] = raw[s.box_col].map(schema.charger_from_box)
 
     for t in schema.THERM_STEPS:
         for stat, col in t.temp_cols.items():
