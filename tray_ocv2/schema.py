@@ -235,6 +235,7 @@ class ThermStep:
     end_col: str | None = None
     dur_col: str | None = None    # 작업시간
     self_heating: bool = False    # 자기발열이 있는 스텝인가 (F3 검증용)
+    box_col: str | None = None    # 충·방전 설비(호기) 박스 ID 컬럼 (§00_facts 2.3d/3.3)
 
 
 def _cd(prefix: str, n: int, order: int, phase: str) -> ThermStep:
@@ -242,7 +243,8 @@ def _cd(prefix: str, n: int, order: int, phase: str) -> ThermStep:
     return ThermStep(
         f"{phase}{n}", p, order, phase,
         {"min": f"{p} 최저 온도", "mean": f"{p} 평균온도", "max": f"{p} 최고 온도"},
-        f"{p} 시작시간", f"{p} 종료시간", f"{p} 작업시간", self_heating=True)
+        f"{p} 시작시간", f"{p} 종료시간", f"{p} 작업시간", self_heating=True,
+        box_col=f"Work BOX_{prefix} #{n:02d}")
 
 
 def _lci(n: int, order: int) -> ThermStep:
@@ -378,6 +380,36 @@ def classify_thermal_state(therm_key: str) -> str:
     return "unknown"
 
 # ---------------------------------------------------------------------------
+# 충·방전 설비 박스 → 호기 매핑 (§00_facts 2.3d/3.3, 2026-07-31 확인)
+# ---------------------------------------------------------------------------
+# 박스 값 예: "CDC #MP1 -2-BOX #03-06 (1-3-6)" 에서 `#MP{a}-{b}` 토큰을 뽑아 호기로 매핑.
+# 호기별 기류가 다르므로(2·3호 바닥6×6+앞뒤외기 / 4·5호 윗4-5-4+바닥4×4+측면외기)
+# 팬 서명(F 그룹)은 호기별로 분리해 분석해야 한다.
+_BOX_MP_TOKEN_RE = re.compile(r"#\s*MP\s*(\d+)\s*-\s*(\d+)", re.IGNORECASE)
+
+#: (MP앞자리, MP뒷자리) → 호기 번호. #MP1-1(=1호 추정)은 값 미제공이라 뺐다 → unknown 처리.
+CHARGER_BY_MP_TOKEN = {(1, 2): 2, (2, 1): 3, (2, 2): 4, (2, 3): 5}
+
+#: 호기별 바닥팬 격자 (§3.3). 8셀 이상·기류 분석에서 참조.
+CHARGER_BOTTOM_FAN_GRID = {2: (6, 6), 3: (6, 6), 4: (4, 4), 5: (4, 4)}
+#: 호기별 추가 외기 방향. 'col_A'=A쪽 횡류, 'col_L'=L쪽 횡류, 'row_ends'=앞뒤(세로) 외기.
+CHARGER_EXTRA_AIRFLOW = {2: "row_ends", 3: "row_ends", 4: "col_A", 5: "col_L"}
+
+
+def charger_from_box(box_value) -> int | None:
+    """박스 문자열 → 충방전기 호기 번호(2~5). 매칭 실패/미등록이면 None.
+
+    호기별로 냉각 기류 형상이 다르므로(§3.3), 온도 지문을 이 값으로 층화해야 한다.
+    """
+    if box_value is None:
+        return None
+    m = _BOX_MP_TOKEN_RE.search(str(box_value))
+    if not m:
+        return None
+    return CHARGER_BY_MP_TOKEN.get((int(m.group(1)), int(m.group(2))))
+
+
+# ---------------------------------------------------------------------------
 # 판정 로직 (현행)
 # ---------------------------------------------------------------------------
 JUDGE_OFFSET_MV = 0.8     # 트레이 mode + 0.8 mV 초과 → 불량
@@ -392,7 +424,7 @@ def all_expected_columns() -> list[str]:
                              s.end_col, s.dur_col) if c]
     for t in THERM_STEPS:
         cols += [c for c in t.temp_cols.values() if c]
-        cols += [c for c in (t.start_col, t.end_col, t.dur_col) if c]
+        cols += [c for c in (t.start_col, t.end_col, t.dur_col, t.box_col) if c]
     for a in AGING:
         cols += [c for c in (a.start_col, a.end_col, a.box_col) if c]
     return sorted(set(cols))

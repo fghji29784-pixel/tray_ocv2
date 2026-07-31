@@ -107,6 +107,7 @@ def build_cell_table(raw: pd.DataFrame) -> pd.DataFrame:
       시각  : start_<stage_key>, end_<stage_key>, dur_<stage_key>(전압 단계)
               start_<therm_key>, end_<therm_key>, dur_<therm_key> (온도 스텝)
               start_<aging_key>, end_<aging_key>, box_<aging_key>
+      설비  : box_<therm_key>(충·방전 박스 원문), charger_<therm_key>(파싱된 호기 2~5)
       기타  : docv7_raw (Delta OCV #07 컬럼), pol_<end_voltage_col> (있는 것만)
     """
     cols: dict[str, pd.Series] = {}
@@ -152,6 +153,9 @@ def build_cell_table(raw: pd.DataFrame) -> pd.DataFrame:
             cols[f"end_{t.key}"] = _to_datetime(raw[t.end_col])
         if t.dur_col and t.dur_col in raw.columns:
             cols[f"dur_{t.key}"] = _to_numeric(raw[t.dur_col])
+        if t.box_col and t.box_col in raw.columns:
+            cols[f"box_{t.key}"] = raw[t.box_col]
+            cols[f"charger_{t.key}"] = raw[t.box_col].map(schema.charger_from_box)
 
     for a in schema.AGING:
         if a.start_col in raw.columns:

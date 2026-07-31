@@ -80,10 +80,27 @@ def check_fan_col_predictions():
          str(schema.FAN_COL_COLD_MIDDLE))
 
 
+def check_charger_from_box():
+    """[2026-07-31] 충·방전 박스 문자열 → 호기 파싱 (§00_facts 2.3d/3.3)."""
+    cases = {
+        "CDC #MP1 -2-BOX #03-06 (1-3-6)": 2,
+        "CDC #MP2 -1-BOX #06-07 (1-6-7)": 3,
+        "CDC #MP2 -2-BOX #06-07 (1-6-7)": 4,
+        "CDC #MP2 -3-BOX #06-07 (1-6-7)": 5,
+        "#MP1-2": 2,                      # 공백 없는 변형
+        "CDC #MP9 -9-BOX (미등록)": None,  # 미등록 토큰 → None
+        "가짜값": None, None: None,
+    }
+    for raw, expected in cases.items():
+        got = schema.charger_from_box(raw)
+        check(f"박스→호기 파싱: {raw!r}→{expected}", got == expected, f"got={got}")
+
+
 def main():
     check_korean_ampm_parsing()
     check_disattenuated_corr()
     check_fan_col_predictions()
+    check_charger_from_box()
 
     raw = make_export(n_trays=30, seed=1)
     check("합성 데이터 생성", len(raw) == 30 * 144, f"len={len(raw)}")
